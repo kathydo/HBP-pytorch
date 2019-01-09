@@ -20,6 +20,7 @@ import pickle
 import numpy as np
 import PIL.Image
 import torch
+import torch.utils.data
 
 
 __all__ = ['CUB200']
@@ -199,3 +200,7 @@ class CUB200(torch.utils.data.Dataset):
                     open(os.path.join(self._root, 'processed/train.pkl'), 'wb'))
         pickle.dump((test_data, test_labels),
                     open(os.path.join(self._root, 'processed/test.pkl'), 'wb'))
+
+if __name__ == "__main__":
+    #c = CUB200('/Users/kathydo/Documents/Github/HBP-pytorch/birds',download=True)     
+    c = CUB200('/data/datasets/birds',download=True) 
