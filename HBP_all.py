@@ -85,8 +85,8 @@ class HBPManager(object):
             param_to_optim, lr=self._options['base_lr'],
             momentum=0.9, weight_decay=self._options['weight_decay'])
         milestones = [100]
-        self._scheduler = torch.optim.lr_scheduler.MultiStepLR(self._solver,milestones = milestones,gamma=0.25)
-
+        #self._scheduler = torch.optim.lr_scheduler.MultiStepLR(self._solver,milestones = milestones,gamma=0.25)
+        self._scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self._solver, mode='max', factor=0.1, patience=5, verbose=True,threshold=1e-4)
         train_transforms = torchvision.transforms.Compose([
             torchvision.transforms.Resize(size=448),  # Let smaller edge match
             torchvision.transforms.RandomHorizontalFlip(),
