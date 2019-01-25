@@ -1,206 +1,251 @@
-# -*- coding: utf-8 -*
-"""This module is served as torchvision.datasets to load CUB200-2011.
-CUB200-2011 dataset has 11,788 images of 200 bird species. The project page
-is as follows.
-    http://www.vision.caltech.edu/visipedia/CUB-200-2011.html
-- Images are contained in the directory data/cub200/raw/images/,
-  with 200 subdirectories.
-- Format of images.txt: <image_id> <image_name>
-- Format of train_test_split.txt: <image_id> <is_training_image>
-- Format of classes.txt: <class_id> <class_name>
-- Format of iamge_class_labels.txt: <image_id> <class_id>
-This file is modified from:
-    https://github.com/vishwakftw/vision.
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""Fine-tune all layers only for HBP(Hierarchical Bilinear Pooling for Fine-Grained Visual Recognition).
+Usage:
+    CUDA_VISIBLE_DEVICES=0,1 python HBP_all.py --base_lr 0.001 --batch_size 24 --epochs 200 --weight_decay 0.0005 --model 'HBP_fc_epoch_*.pth' | tee 'hbp_all.log'
 """
 
 
 import os
-import pickle
-
-import numpy as np
-import PIL.Image
 import torch
-import torch.utils.data
+import torchvision
+import cub200
+import visdom
+import argparse
+vis = visdom.Visdom(env=u'HBP_all',use_incoming_socket=False)
+torch.manual_seed(0)
+torch.cuda.manual_seed_all(0)
 
+class HBP(torch.nn.Module):
+    def __init__(self):
+        """Declare all needed layers."""
+        torch.nn.Module.__init__(self)
+        # Convolution and pooling layers of VGG-16.
+        self.features = torchvision.models.vgg16(pretrained=False).features
+        self.features_conv5_1 = torch.nn.Sequential(*list(self.features.children())
+                                            [:-5])  
+        self.features_conv5_2 = torch.nn.Sequential(*list(self.features.children())
+                                            [-5:-3])  
+        self.features_conv5_3 = torch.nn.Sequential(*list(self.features.children())
+                                            [-3:-1])     
+        self.bilinear_proj = torch.nn.Sequential(torch.nn.Conv2d(512,8192,kernel_size=1,bias=False),
+                                        torch.nn.BatchNorm2d(8192),
+                                        torch.nn.ReLU(inplace=True))
+        # Linear classifier.
+        self.fc = torch.nn.Linear(8192*3, 200)
 
-__all__ = ['CUB200']
-__author__ = 'Hao Zhang'
-__copyright__ = '2018 LAMDA'
-__date__ = '2018-01-09'
-__email__ = 'zhangh0214@gmail.com'
-__license__ = 'CC BY-SA 3.0'
-__status__ = 'Development'
-__updated__ = '2018-01-10'
-__version__ = '1.0'
+    def hbp(self,conv1,conv2):
+        N = conv1.size()[0]
+        proj_1 = self.bilinear_proj(conv1)
+        proj_2 = self.bilinear_proj(conv2)
+        assert(proj_1.size() == (N,8192,28,28))
+        X = proj_1 * proj_2
+        assert(X.size() == (N,8192,28,28))    
+        X = torch.sum(X.view(X.size()[0],X.size()[1],-1),dim = 2)
+        X = X.view(N, 8192)   
+        X = torch.sqrt(X + 1e-5)
+        X = torch.nn.functional.normalize(X)
+        return X
 
+    def forward(self, X):
+        N = X.size()[0]
+        assert X.size() == (N, 3, 448, 448)
+        X_conv5_1 = self.features_conv5_1(X)
+        X_conv5_2 = self.features_conv5_2(X_conv5_1)
+        X_conv5_3 = self.features_conv5_3(X_conv5_2)
+        
+        X_branch_1 = self.hbp(X_conv5_1,X_conv5_2)
+        X_branch_2 = self.hbp(X_conv5_2,X_conv5_3)
+        X_branch_3 = self.hbp(X_conv5_1,X_conv5_3)
 
-class CUB200(torch.utils.data.Dataset):
-    """CUB200 dataset.
-    Args:
-        _root, str: Root directory of the dataset.
-        _train, bool: Load train/test data.
-        _transform, callable: A function/transform that takes in a PIL.Image
-            and transforms it.
-        _target_transform, callable: A function/transform that takes in the
-            target and transforms it.
-        _train_data, list of np.ndarray.
-        _train_labels, list of int.
-        _test_data, list of np.ndarray.
-        _test_labels, list of int.
-    """
-    def __init__(self, root, train=True, transform=None, target_transform=None,
-                 download=False):
-        """Load the dataset.
-        Args
-            root, str: Root directory of the dataset.
-            train, bool [True]: Load train/test data.
-            transform, callable [None]: A function/transform that takes in a
-                PIL.Image and transforms it.
-            target_transform, callable [None]: A function/transform that takes
-                in the target and transforms it.
-            download, bool [False]: If true, downloads the dataset from the
-                internet and puts it in root directory. If dataset is already
-                downloaded, it is not downloaded again.
-        """
-        self._root = os.path.expanduser(root)  # Replace ~ by the complete dir
-        self._train = train
-        self._transform = transform
-        self._target_transform = target_transform
+        X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim=1)
+        assert X_branch.size() == (N,8192*3)
 
-        if self._checkIntegrity():
-            print('Files already downloaded and verified.')
-        elif download:
-            url = ('http://www.vision.caltech.edu/visipedia-data/CUB-200-2011/'
-                   'CUB_200_2011.tgz')
-            self._download(url)
-            self._extract()
+        X = self.fc(X_branch)
+        assert X.size() == (N, 200)
+        return X
+
+class HBPManager(object):
+    def __init__(self, options, path):
+        print('Prepare the network and data.')
+        self._options = options
+        self._path = path
+        # Network.
+        self._net = torch.nn.DataParallel(HBP()).cuda()
+        print(self._net)
+        self._net.load_state_dict(torch.load(self._path['model']))
+        # Criterion.
+        self._criterion = torch.nn.CrossEntropyLoss().cuda()
+        # Solver.
+        param_to_optim = []
+        for param in self._net.parameters():
+            param_to_optim.append(param)
+
+        self._solver = torch.optim.SGD(
+            param_to_optim, lr=self._options['base_lr'],
+            momentum=0.9, weight_decay=self._options['weight_decay'])
+        milestones = [100]
+        self._scheduler = torch.optim.lr_scheduler.MultiStepLR(self._solver,milestones = milestones,gamma=0.25)
+
+        train_transforms = torchvision.transforms.Compose([
+            torchvision.transforms.Resize(size=448),  # Let smaller edge match
+            torchvision.transforms.RandomHorizontalFlip(),
+            torchvision.transforms.RandomCrop(size=448),
+            torchvision.transforms.ToTensor(),
+            torchvision.transforms.Normalize(mean=(0.485, 0.456, 0.406),
+                                             std=(0.229, 0.224, 0.225))
+        ])
+        test_transforms = torchvision.transforms.Compose([
+            torchvision.transforms.Resize(size=448),
+            torchvision.transforms.CenterCrop(size=448),
+            torchvision.transforms.ToTensor(),
+            torchvision.transforms.Normalize(mean=(0.485, 0.456, 0.406),
+                                             std=(0.229, 0.224, 0.225))
+        ])
+        train_data = cub200.CUB200(
+            root=self._path['cub200'], train=True, download=True,
+            transform=train_transforms)
+        test_data = cub200.CUB200(
+            root=self._path['cub200'], train=False, download=True,
+            transform=test_transforms)
+        self._train_loader = torch.utils.data.DataLoader(
+            train_data, batch_size=self._options['batch_size'],
+            shuffle=True, num_workers=4, pin_memory=True)
+        self._test_loader = torch.utils.data.DataLoader(
+            test_data, batch_size=16,
+            shuffle=False, num_workers=4, pin_memory=True)
+
+    def train(self):
+        print('Training.')
+        best_acc = 0.0
+        best_epoch = None
+        print('Epoch\tTrain loss\tTrain acc\tTest acc')
+        ii = 0
+        for t in range(self._options['epochs']):
+            epoch_loss = []
+            num_correct = 0
+            num_total = 0
+            for X, y in self._train_loader:
+                # Data.
+                X = torch.autograd.Variable(X.cuda())
+                y = torch.autograd.Variable(y.cuda(non_blocking = True))
+                # Clear the existing gradients.
+                self._solver.zero_grad()
+                # Forward pass.
+                score = self._net(X)
+                loss = self._criterion(score, y)
+                epoch_loss.append(loss.data[0])
+                # Prediction.
+                _, prediction = torch.max(score.data, 1)
+                num_total += y.size(0)
+                num_correct += torch.sum(prediction == y.data)
+                # Backward pass.
+                loss.backward()
+                self._solver.step()
+
+                ii += 1
+                x = torch.Tensor([ii])
+                y = torch.Tensor([loss.data[0]])
+                vis.line(X=x, Y=y, win='polynomial', update='append' if ii>0 else None)
+
+            num_correct = torch.tensor(num_correct).float().cuda()
+            num_total = torch.tensor(num_total).float().cuda()
+
+            train_acc = 100 * num_correct / num_total
+            test_acc = self._accuracy(self._test_loader)
+            self._scheduler.step(test_acc)
+            if test_acc > best_acc:
+                best_acc = test_acc
+                best_epoch = t + 1
+                print('*', end='')
+                # Save model onto disk.
+                torch.save(self._net.state_dict(),
+                           os.path.join('./model/'
+                                        'HBP_all_epoch_%d.pth' % (t + 1)))
+            print('%d\t%4.3f\t\t%4.2f%%\t\t%4.2f%%' %
+                  (t+1, sum(epoch_loss) / len(epoch_loss), train_acc, test_acc))
+        print('Best at epoch %d, test accuaray %f' % (best_epoch, best_acc))
+
+    def _accuracy(self, data_loader):
+        self._net.train(False)
+        num_correct = 0
+        num_total = 0
+        for X, y in data_loader:
+            # Data.
+            X = torch.autograd.Variable(X.cuda())
+            y = torch.autograd.Variable(y.cuda(non_blocking = True))
+            # Prediction.
+            score = self._net(X)
+            _, prediction = torch.max(score.data, 1)
+            num_total += y.size(0)
+            num_correct += torch.sum(prediction == y.data)
+        self._net.train(True)  # Set the model to training phase
+        num_correct = torch.tensor(num_correct).float().cuda()
+        num_total = torch.tensor(num_total).float().cuda()
+        return 100 * num_correct / num_total
+
+    def getStat(self):
+        print('Compute mean and variance for training data.')
+        train_data = cub200.CUB200(
+            root=self._path['cub200'], train=True,
+            transform=torchvision.transforms.ToTensor(), download=True)
+        train_loader = torch.utils.data.DataLoader(
+            train_data, batch_size=1, shuffle=False, num_workers=4,
+            pin_memory=True)
+        mean = torch.zeros(3)
+        std = torch.zeros(3)
+        for X, _ in train_loader:
+            for d in range(3):
+                mean[d] += X[:, d, :, :].mean()
+                std[d] += X[:, d, :, :].std()
+        mean.div_(len(train_data))
+        std.div_(len(train_data))
+        print(mean)
+        print(std)
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Train HBP on CUB200.')
+    parser.add_argument('--base_lr', dest='base_lr', type=float, required=True,
+                        help='Base learning rate for training.')
+    parser.add_argument('--batch_size', dest='batch_size', type=int,
+                        required=True, help='Batch size.')
+    parser.add_argument('--epochs', dest='epochs', type=int,
+                        required=True, help='Epochs for training.')
+    parser.add_argument('--weight_decay', dest='weight_decay', type=float,
+                        required=True, help='Weight decay.')
+    parser.add_argument('--model', dest='model', type=str, required=True,
+                        help='Model for fine-tuning.')
+    args = parser.parse_args()
+    if args.base_lr <= 0:
+        raise AttributeError('--base_lr parameter must >0.')
+    if args.batch_size <= 0:
+        raise AttributeError('--batch_size parameter must >0.')
+    if args.epochs < 0:
+        raise AttributeError('--epochs parameter must >=0.')
+    if args.weight_decay <= 0:
+        raise AttributeError('--weight_decay parameter must >0.')
+
+    options = {
+        'base_lr': args.base_lr,
+        'batch_size': args.batch_size,
+        'epochs': args.epochs,
+        'weight_decay': args.weight_decay,
+    }
+
+    project_root = os.popen('pwd').read().strip()
+    path = {
+        'cub200': os.path.join(project_root, 'data/cub200'),
+        'model': os.path.join(project_root, 'model', args.model),
+    }
+    for d in path:
+        if d == 'model':
+            assert os.path.isfile(path[d])
         else:
-            raise RuntimeError(
-                'Dataset not found. You can use download=True to download it.')
+            assert os.path.isdir(path[d])
 
-        # Now load the picked data.
-        if self._train:
-            self._train_data, self._train_labels = pickle.load(open(
-                os.path.join(self._root, 'processed/train.pkl'), 'rb'),encoding='iso-8859-1')
-            assert (len(self._train_data) == 5994
-                    and len(self._train_labels) == 5994)
-        else:
-            self._test_data, self._test_labels = pickle.load(open(
-                os.path.join(self._root, 'processed/test.pkl'), 'rb'),encoding='iso-8859-1')
-            assert (len(self._test_data) == 5794
-                    and len(self._test_labels) == 5794)
-
-    def __getitem__(self, index):
-        """
-        Args:
-            index, int: Index.
-        Returns:
-            image, PIL.Image: Image of the given index.
-            target, str: target of the given index.
-        """
-        if self._train:
-            image, target = self._train_data[index], self._train_labels[index]
-        else:
-            image, target = self._test_data[index], self._test_labels[index]
-        # Doing this so that it is consistent with all other datasets.
-        image = PIL.Image.fromarray(image)
-
-        if self._transform is not None:
-            image = self._transform(image)
-        if self._target_transform is not None:
-            target = self._target_transform(target)
-
-        return image, target
-
-    def __len__(self):
-        """Length of the dataset.
-        Returns:
-            length, int: Length of the dataset.
-        """
-        if self._train:
-            return len(self._train_data)
-        return len(self._test_data)
-
-    def _checkIntegrity(self):
-        """Check whether we have already processed the data.
-        Returns:
-            flag, bool: True if we have already processed the data.
-        """
-        return (
-            os.path.isfile(os.path.join(self._root, 'processed/train.pkl'))
-            and os.path.isfile(os.path.join(self._root, 'processed/test.pkl')))
-
-    def _download(self, url):
-        """Download and uncompress the tar.gz file from a given URL.
-        Args:
-            url, str: URL to be downloaded.
-        """
-        import six.moves
-        import tarfile
-
-        raw_path = os.path.join(self._root, 'raw')
-        processed_path = os.path.join(self._root, 'processed')
-        if not os.path.isdir(raw_path):
-            os.mkdir(raw_path, mode=0o775)
-        if not os.path.isdir(processed_path):
-            os.mkdir(processed_path, mode=0x775)
-
-        # Downloads file.
-        fpath = os.path.join(self._root, 'raw/CUB_200_2011.tgz')
-        try:
-            print('Downloading ' + url + ' to ' + fpath)
-            six.moves.urllib.request.urlretrieve(url, fpath)
-        except six.moves.urllib.error.URLError:
-            if url[:5] == 'https:':
-                self._url = self._url.replace('https:', 'http:')
-                print('Failed download. Trying https -> http instead.')
-                print('Downloading ' + url + ' to ' + fpath)
-                six.moves.urllib.request.urlretrieve(url, fpath)
-
-        # Extract file.
-        cwd = os.getcwd()
-        tar = tarfile.open(fpath, 'r:gz')
-        os.chdir(os.path.join(self._root, 'raw'))
-        tar.extractall()
-        tar.close()
-        os.chdir(cwd)
-
-    def _extract(self):
-        """Prepare the data for train/test split and save onto disk."""
-        image_path = os.path.join(self._root, 'raw/CUB_200_2011/images/')
-        # Format of images.txt: <image_id> <image_name>
-        id2name = np.genfromtxt(os.path.join(
-            self._root, 'raw/CUB_200_2011/images.txt'), dtype=str)
-        # Format of train_test_split.txt: <image_id> <is_training_image>
-        id2train = np.genfromtxt(os.path.join(
-            self._root, 'raw/CUB_200_2011/train_test_split.txt'), dtype=int)
-
-        train_data = []
-        train_labels = []
-        test_data = []
-        test_labels = []
-        for id_ in range(id2name.shape[0]):
-            image = PIL.Image.open(os.path.join(image_path, id2name[id_, 1]))
-            label = int(id2name[id_, 1][:3]) - 1  # Label starts with 0
-
-            # Convert gray scale image to RGB image.
-            if image.getbands()[0] == 'L':
-                image = image.convert('RGB')
-            image_np = np.array(image)
-            image.close()
-
-            if id2train[id_, 1] == 1:
-                train_data.append(image_np)
-                train_labels.append(label)
-            else:
-                test_data.append(image_np)
-                test_labels.append(label)
-
-        pickle.dump((train_data, train_labels),
-                    open(os.path.join(self._root, 'processed/train.pkl'), 'wb'))
-        pickle.dump((test_data, test_labels),
-                    open(os.path.join(self._root, 'processed/test.pkl'), 'wb'))
-
-if __name__ == "__main__":
-    #c = CUB200('/Users/kathydo/Documents/Github/HBP-pytorch/birds',download=True)     
-    c = CUB200('/data/datasets/birds',download=True) 
+    manager = HBPManager(options, path)
+    manager.getStat()
+    manager.train()
+if __name__ == '__main__':
+    main()
