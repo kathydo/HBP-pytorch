@@ -260,7 +260,7 @@ def main():
 
     project_root = os.popen('pwd').read().strip()
     path = {
-        'cub200': os.path.join(project_root, 'data/cub200'),
+        'cub200': os.path.join('data/datasets/birds'),
         'model': os.path.join(project_root, 'model'),
     }
     for d in path:
