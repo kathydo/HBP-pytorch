@@ -159,7 +159,7 @@ class HBPManager(object):
                 # Forward pass.
                 score = self._net(X)
                 loss = self._criterion(score, y)
-                epoch_loss.append(loss.data[0])
+                epoch_loss.append(loss.item())
                 # Prediction.
                 _, prediction = torch.max(score.data, 1)
                 num_total += y.size(0)
@@ -170,7 +170,7 @@ class HBPManager(object):
 
                 ii += 1
                 x = torch.Tensor([ii])
-                y = torch.Tensor([loss.data[0]])
+                y = torch.Tensor([loss.item()])
                 vis.line(X=x, Y=y, win='polynomial', update='append' if ii>0 else None)
 
             num_correct = torch.tensor(num_correct).float().cuda()
@@ -260,7 +260,7 @@ def main():
 
     project_root = os.popen('pwd').read().strip()
     path = {
-        'cub200': os.path.join('data/datasets/birds'),
+        'cub200': os.path.join('/data/datasets/birds'),
         'model': os.path.join(project_root, 'model'),
     }
     for d in path:
