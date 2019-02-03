@@ -12,10 +12,14 @@ import torchvision
 import cub200
 import visdom
 import argparse
+from tensorboardX import SummaryWriter
 vis = visdom.Visdom(env=u'HBP_all',use_incoming_socket=False)
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
 
+
+#Below is a module == neural net layer
+#It inputs and outputs layers
 class HBP(torch.nn.Module):
     def __init__(self):
         """Declare all needed layers."""
@@ -87,6 +91,8 @@ class HBPManager(object):
         #milestones = [100]
         #self._scheduler = torch.optim.lr_scheduler.MultiStepLR(self._solver,milestones = milestones,gamma=0.25)
         self._scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self._solver, mode='max', factor=0.1, patience=5, verbose=True,threshold=1e-4)
+        
+        #Transformations
         train_transforms = torchvision.transforms.Compose([
             torchvision.transforms.Resize(size=448),  # Let smaller edge match
             torchvision.transforms.RandomHorizontalFlip(),

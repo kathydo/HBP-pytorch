@@ -11,8 +11,9 @@ import torchvision
 import cub200
 import visdom
 import argparse
+from tensorboardX import SummaryWriter
 
-vis = visdom.Visdom(env=u'HBP_fc',use_incoming_socket=False)
+#vis = visdom.Visdom(env=u'HBP_fc',use_incoming_socket=False)
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
 
@@ -31,6 +32,7 @@ class HBP(torch.nn.Module):
                                         torch.nn.BatchNorm2d(8192),
                                         torch.nn.ReLU(inplace=True))
         # Linear classifier.
+        #Value d = 8192 when accuracy is saturated
         self.fc = torch.nn.Linear(8192*3, 200)
 
         # Freeze all previous layers.
@@ -144,6 +146,16 @@ class HBPManager(object):
         print('Training.')
         best_acc = 0.0
         best_epoch = None
+
+        ## Create summary writer in different sub folders
+        tr_writer = SummaryWriter(
+        log_dir=os.path.join(config.log_dir, "train"))
+        va_writer = SummaryWriter(
+        log_dir=os.path.join(config.log_dir, "valid"))
+
+        #log loss and accuracy to tensorboard
+        #tr_writer.add_scalar('', dummy_s1[0], n_iter)
+
         print('Epoch\tTrain loss\tTrain acc\tTest acc')
         ii = 0
         for t in range(self._options['epochs']):
@@ -171,7 +183,7 @@ class HBPManager(object):
                 ii += 1
                 x = torch.Tensor([ii])
                 y = torch.Tensor([loss.item()])
-                vis.line(X=x, Y=y, win='polynomial', update='append' if ii>0 else None)
+                #vis.line(X=x, Y=y, win='polynomial', update='append' if ii>0 else None)
 
             num_correct = torch.tensor(num_correct).float().cuda()
             num_total = torch.tensor(num_total).float().cuda()
@@ -271,3 +283,4 @@ def main():
     manager.train()
 
 if __name__ == '__main__':
+    main()
