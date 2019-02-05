@@ -9,12 +9,10 @@ import os
 import torch
 import torchvision
 import cub200
-import visdom
+#import visdom
 import argparse
+from tensorboardX import SummaryWriter
 
-#from tensorboardX import SummaryWriter
-
-#vis = visdom.Visdom(env=u'HBP_fc',use_incoming_socket=False)
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
 
@@ -23,17 +21,24 @@ class HBP(torch.nn.Module):
         torch.nn.Module.__init__(self)
         # Convolution and pooling layers of VGG-16.
         self.features = torchvision.models.vgg16(pretrained=True).features
+
+        #getting conv4_3 by taking layers before maxpool
+        self.features_conv4_3 = torch.nn.Sequential(*list(self.features.children())
+                                            [:23]) 
+
         self.features_conv5_1 = torch.nn.Sequential(*list(self.features.children())
-                                            [:-5])  
+                                            [:-5]) 
+        #self.conv5_resize = torch.nn.Upsample(scale_factor = 2, mode='bilinear')
+
         self.features_conv5_2 = torch.nn.Sequential(*list(self.features.children())
                                             [-5:-3])  
         self.features_conv5_3 = torch.nn.Sequential(*list(self.features.children())
                                             [-3:-1])     
-        self.bilinear_proj = torch.nn.Sequential(torch.nn.Conv2d(512,8192,kernel_size=1,bias=False),
+        #self.bilinear_proj = torch.nn.Sequential(torch.nn.Conv2d(512,8192,kernel_size=1,bias=False),
+        self.bilinear_proj = torch.nn.Sequential(torch.nn.Conv2d(1024,8192,kernel_size=1,bias=False),
                                         torch.nn.BatchNorm2d(8192),
                                         torch.nn.ReLU(inplace=True))
         # Linear classifier.
-        #Value d = 8192 when accuracy is saturated
         self.fc = torch.nn.Linear(8192*3, 200)
 
         # Freeze all previous layers.
@@ -66,9 +71,15 @@ class HBP(torch.nn.Module):
         N = conv1.size()[0]
         proj_1 = self.bilinear_proj(conv1)
         proj_2 = self.bilinear_proj(conv2)
-        assert(proj_1.size() == (N,8192,28,28))
+
+        assert(proj_1.size() == (N,8192,56,56))
+        #assert(proj_1.size() == (N,8192,28,28))    //old dimension 28*28
+        
         X = proj_1 * proj_2
-        assert(X.size() == (N,8192,28,28))    
+
+        assert(X.size() == (N,8192,56,56))
+        #assert(X.size() == (N,8192,28,28))    
+        
         X = torch.sum(X.view(X.size()[0],X.size()[1],-1),dim = 2)
         X = X.view(N, 8192)     
         X = torch.sqrt(X + 1e-5)
@@ -76,26 +87,48 @@ class HBP(torch.nn.Module):
         return X
 
     def forward(self, X):
-        N = X.size()[0]
+        N = X.size()[0]     #N = 12
+
         assert X.size() == (N, 3, 448, 448)
+        
+        resize_double = torch.nn.Upsample(scale_factor = 2, mode='bilinear')
+
+        X_conv4_3 = self.features_conv4_3(X)
+        
         X_conv5_1 = self.features_conv5_1(X)
         X_conv5_2 = self.features_conv5_2(X_conv5_1)
         X_conv5_3 = self.features_conv5_3(X_conv5_2)
+
+        #upsample conv5 layers to match size of conv4
+        X_conv5_1_resize = resize_double(X_conv5_1)
+        X_conv5_2_resize = resize_double(X_conv5_2)
+        X_conv5_3_resize = resize_double(X_conv5_3)
+
+        #comcatenate conv 4 and conv 5
+        X_conv4_concat5_1 = torch.cat((X_conv4_3, X_conv5_1_resize), 1)
+        X_conv4_concat5_2 = torch.cat((X_conv4_3, X_conv5_2_resize), 1)
+        X_conv4_concat5_3 = torch.cat((X_conv4_3, X_conv5_3_resize), 1)
+
         
-        X_branch_1 = self.hbp(X_conv5_1,X_conv5_2)
-        X_branch_2 = self.hbp(X_conv5_2,X_conv5_3)
-        X_branch_3 = self.hbp(X_conv5_1,X_conv5_3)
+        X_branch_1 = self.hbp(X_conv4_concat5_1, X_conv4_concat5_2)
+        X_branch_2 = self.hbp(X_conv4_concat5_2, X_conv4_concat5_3)
+        X_branch_3 = self.hbp(X_conv4_concat5_1, X_conv4_concat5_3)
 
         X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim = 1)
+
         assert X_branch.size() == (N,8192*3)
         X = self.fc(X_branch)
         assert X.size() == (N, 200)
         return X
 
 class HBPManager(object):
-    def __init__(self, optins, path):
+    def __init__(self, options, path):
+
         self._options = options
         self._path = path
+
+        print(self._options)
+        print(self._path)
         # Network.
         self._net = torch.nn.DataParallel(HBP()).cuda()
         print(self._net)
@@ -147,20 +180,24 @@ class HBPManager(object):
         print('Training.')
         best_acc = 0.0
         best_epoch = None
-
-        ## Create summary writer in different sub folders
-        '''
-        tr_writer = SummaryWriter(
-        log_dir=os.path.join(config.log_dir, "train"))
-        va_writer = SummaryWriter(
-        log_dir=os.path.join(config.log_dir, "valid"))
-        '''
-
-        #log loss and accuracy to tensorboard
-        #tr_writer.add_scalar('', dummy_s1[0], n_iter)
-
         print('Epoch\tTrain loss\tTrain acc\tTest acc')
         ii = 0
+
+        ## Create summary writer in different sub folders
+        
+        tr_writer = SummaryWriter(
+        log_dir=os.path.join(self._options['log_dir'], "train"))
+        va_writer = SummaryWriter(
+        log_dir=os.path.join(self._options['log_dir'], "valid"))
+        
+
+        #log loss and accuracy to tensorboard
+        # Create log directory and save directory if it does not exist
+        #if not os.path.exists(self._options['log_dir']):
+        #    os.makedirs(self._options['log_dir'])
+        # if not os.path.exists(self._options['save_dir']):
+        #     os.makedirs(self._options['save_dir'])
+
         for t in range(self._options['epochs']):
             epoch_loss = []
             num_correct = 0
@@ -187,9 +224,13 @@ class HBPManager(object):
                 x = torch.Tensor([ii])
                 y = torch.Tensor([loss.item()])
                 #vis.line(X=x, Y=y, win='polynomial', update='append' if ii>0 else None)
+                tr_writer.add_scalar('X', x, ii)
+                tr_writer.add_scalar('Y', y, ii)
+
 
             num_correct = torch.tensor(num_correct).float().cuda()
             num_total = torch.tensor(num_total).float().cuda()
+
 
             train_acc = 100 * num_correct / num_total
             test_acc = self._accuracy(self._test_loader)
@@ -256,6 +297,8 @@ def main():
                         required=True, help='Epochs for training.')
     parser.add_argument('--weight_decay', dest='weight_decay', type=float,
                         required=True, help='Weight decay.')
+    parser.add_argument('--log_dir', dest='log_dir', type=str,
+                        required=True, help='Name of log directory.')
     args = parser.parse_args()
     if args.base_lr <= 0:
         raise AttributeError('--base_lr parameter must >0.')
@@ -271,14 +314,16 @@ def main():
         'batch_size': args.batch_size,
         'epochs': args.epochs,
         'weight_decay': args.weight_decay,
+        'log_dir': args.log_dir
     }
 
     project_root = os.popen('pwd').read().strip()
     path = {
-        'cub200': os.path.join('/data/datasets/birds'),
+        'cub200': '/data/datasets/birds',
         'model': os.path.join(project_root, 'model'),
     }
     for d in path:
+        print(path[d])
         assert os.path.isdir(path[d])
 
     manager = HBPManager(options, path)
