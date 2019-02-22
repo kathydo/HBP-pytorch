@@ -13,7 +13,7 @@ import cub200
 import visdom
 import argparse
 from tensorboardX import SummaryWriter
-vis = visdom.Visdom(env=u'HBP_all',use_incoming_socket=False)
+#vis = visdom.Visdom(env=u'HBP_all',use_incoming_socket=False)
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
 
@@ -127,6 +127,14 @@ class HBPManager(object):
         best_epoch = None
         print('Epoch\tTrain loss\tTrain acc\tTest acc')
         ii = 0
+
+        ## Create summary writer in different sub folders
+        
+        tr_writer = SummaryWriter(
+        log_dir=os.path.join(self._options['log_dir'], "train"))
+        va_writer = SummaryWriter(
+        log_dir=os.path.join(self._options['log_dir'], "valid"))
+        
         for t in range(self._options['epochs']):
             epoch_loss = []
             num_correct = 0
@@ -152,7 +160,9 @@ class HBPManager(object):
                 ii += 1
                 x = torch.Tensor([ii])
                 y = torch.Tensor([loss.item()])
-                vis.line(X=x, Y=y, win='polynomial', update='append' if ii>0 else None)
+                #vis.line(X=x, Y=y, win='polynomial', update='append' if ii>0 else None)
+                tr_writer.add_scalar('X', x, ii)
+                tr_writer.add_scalar('X', y, ii)
 
             num_correct = torch.tensor(num_correct).float().cuda()
             num_total = torch.tensor(num_total).float().cuda()

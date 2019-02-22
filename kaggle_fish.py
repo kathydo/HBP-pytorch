@@ -167,7 +167,7 @@ class KaggleFish(torch.utils.data.Dataset):
 
     def _extract(self):
         """Prepare the data for train/test split and save onto disk."""
-        train_image_path = os.path.join(self._root, 'raw/CUB_200_2011/images/')
+        train_image_path = os.path.join(self._root, 'raw/train/')
         # Format of images.txt: <image_id> <image_name>
         id2name = np.genfromtxt(os.path.join(
             self._root, 'raw/CUB_200_2011/images.txt'), dtype=str)

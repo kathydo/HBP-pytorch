@@ -9,7 +9,7 @@ import os
 import torch
 import torchvision
 import cub200
-import visdom
+#import visdom
 import argparse
 
 #from tensorboardX import SummaryWriter
@@ -77,6 +77,7 @@ class HBP(torch.nn.Module):
 
     def forward(self, X):
         N = X.size()[0]
+
         assert X.size() == (N, 3, 448, 448)
         X_conv5_1 = self.features_conv5_1(X)
         X_conv5_2 = self.features_conv5_2(X_conv5_1)

@@ -94,6 +94,9 @@ class HBP(torch.nn.Module):
         resize_double = torch.nn.Upsample(scale_factor = 2, mode='bilinear')
 
         X_conv4_3 = self.features_conv4_3(X)
+
+        print("X_conv4_3.shape")
+        print(X_conv4_3.shape)
         
         X_conv5_1 = self.features_conv5_1(X)
         X_conv5_2 = self.features_conv5_2(X_conv5_1)
@@ -104,17 +107,28 @@ class HBP(torch.nn.Module):
         X_conv5_2_resize = resize_double(X_conv5_2)
         X_conv5_3_resize = resize_double(X_conv5_3)
 
+        print("X_conv5_1_resize.shape")
+        print(X_conv5_1_resize.shape)
+
         #comcatenate conv 4 and conv 5
         X_conv4_concat5_1 = torch.cat((X_conv4_3, X_conv5_1_resize), 1)
         X_conv4_concat5_2 = torch.cat((X_conv4_3, X_conv5_2_resize), 1)
         X_conv4_concat5_3 = torch.cat((X_conv4_3, X_conv5_3_resize), 1)
 
+        print("X_conv4_concat5_1")
+        print(X_conv4_concat5_1.shape)
         
         X_branch_1 = self.hbp(X_conv4_concat5_1, X_conv4_concat5_2)
         X_branch_2 = self.hbp(X_conv4_concat5_2, X_conv4_concat5_3)
         X_branch_3 = self.hbp(X_conv4_concat5_1, X_conv4_concat5_3)
 
+        print("X_branch_1.shape")
+        print(X_branch_1.shape)
+
         X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim = 1)
+
+        print("X_branch.shape")
+        print(X_branch.shape)
 
         assert X_branch.size() == (N,8192*3)
         X = self.fc(X_branch)

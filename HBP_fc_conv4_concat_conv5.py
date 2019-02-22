@@ -28,7 +28,6 @@ class HBP(torch.nn.Module):
 
         self.features_conv5_1 = torch.nn.Sequential(*list(self.features.children())
                                             [:-5]) 
-        #self.conv5_resize = torch.nn.Upsample(scale_factor = 2, mode='bilinear')
 
         self.features_conv5_2 = torch.nn.Sequential(*list(self.features.children())
                                             [-5:-3])  

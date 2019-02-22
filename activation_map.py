@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Fine-tune the fc layer only for  HBP(Hierarchical Bilinear Pooling for Fine-Grained Visual Recognition).
+"""Fine-tune all layers only for HBP(Hierarchical Bilinear Pooling for Fine-Grained Visual Recognition).
 Usage:
-    CUDA_VISIBLE_DEVICES=0,1 python HBP_fc.py --base_lr 1.0 --batch_size 12 --epochs 120 --weight_decay 0.000005 | tee 'hbp_fc.log'
+    CUDA_VISIBLE_DEVICES=0,1 python HBP_all.py --base_lr 0.001 --batch_size 24 --epochs 200 --weight_decay 0.0005 --model 'HBP_fc_epoch_*.pth' | tee 'hbp_all.log'
 """
+
 
 import os
 import torch
@@ -11,181 +12,176 @@ import torchvision
 import cub200
 #import visdom
 import argparse
-from tensorboardX import SummaryWriter
 
-#vis = visdom.Visdom(env=u'HBP_fc',use_incoming_socket=False)
+#import os
+import copy
+#import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchvision.transforms as transforms
+
+from PIL import Image
+from torch.autograd import Variable
+import matplotlib.pyplot as plt
+#from CaffeLoader import loadCaffemodel
+#from tensorboardX import SummaryWriter
+#vis = visdom.Visdom(env=u'HBP_all',use_incoming_socket=False)
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
 
+
+#Below is a module == neural net layer
+#It inputs and outputs layers
 class HBP(torch.nn.Module):
     def __init__(self):
+        """Declare all needed layers."""
         torch.nn.Module.__init__(self)
         # Convolution and pooling layers of VGG-16.
-        self.features = torchvision.models.vgg16(pretrained=True).features
-
-        #print('VGG16 Pre trained all features:')
-        #print(torch.nn.Sequential(*list(self.features.children())[20:]) )
-
-        #getting conv4_3 by taking layers before maxpool
-        self.features_conv4_3 = torch.nn.Sequential(*list(self.features.children())
-                                            [:23]) 
-
-        #print("Conv 4_3. whatis it?")
-        #print(self.features_conv4_3)
-
+        self.features = torchvision.models.vgg16(pretrained=False).features
         self.features_conv5_1 = torch.nn.Sequential(*list(self.features.children())
-                                            [:-5]) 
-        #self.conv5_resize = torch.nn.Upsample(scale_factor = 2, mode='bilinear')
-
+                                            [:-5])  
         self.features_conv5_2 = torch.nn.Sequential(*list(self.features.children())
                                             [-5:-3])  
         self.features_conv5_3 = torch.nn.Sequential(*list(self.features.children())
                                             [-3:-1])     
-        #self.bilinear_proj = torch.nn.Sequential(torch.nn.Conv2d(512,8192,kernel_size=1,bias=False),
-        self.bilinear_proj = torch.nn.Sequential(torch.nn.Conv2d(1024,8192,kernel_size=1,bias=False),
+        self.bilinear_proj = torch.nn.Sequential(torch.nn.Conv2d(512,8192,kernel_size=1,bias=False),
                                         torch.nn.BatchNorm2d(8192),
                                         torch.nn.ReLU(inplace=True))
         # Linear classifier.
         self.fc = torch.nn.Linear(8192*3, 200)
 
-        # Freeze all previous layers.
-        for param in self.features_conv5_1.parameters():
-            param.requires_grad = False
-        for param in self.features_conv5_2.parameters():
-            param.requires_grad = False
-        for param in self.features_conv5_3.parameters():
-            param.requires_grad = False
-
-        # Initialize the fc layers.    
-        torch.nn.init.xavier_normal_(self.fc.weight.data)
-        if self.fc.bias is not None:
-            torch.nn.init.constant_(self.fc.bias.data, val=0)
-
-        #init
-        for m in self.bilinear_proj.modules():
-            if isinstance(m, torch.nn.Conv2d):
-                torch.nn.init.xavier_normal_(m.weight)
-                if m.bias is not None:
-                    torch.nn.init.constant_(m.bias, 0)
-            elif isinstance(m, torch.nn.BatchNorm2d):
-                torch.nn.init.constant_(m.weight,1)
-                torch.nn.init.constant_(m.bias, 0)
-            elif isinstance(m, torch.nn.Linear):
-                torch.nn.init.xavier_normal_(m.weight)
-                torch.nn.init.constant_(m.bias, 0)
-
     def hbp(self,conv1,conv2):
         N = conv1.size()[0]
         proj_1 = self.bilinear_proj(conv1)
         proj_2 = self.bilinear_proj(conv2)
-
-        assert(proj_1.size() == (N,8192,56,56))
-        #assert(proj_1.size() == (N,8192,28,28))    //old dimension 28*28
-        
+        assert(proj_1.size() == (N,8192,28,28))
         X = proj_1 * proj_2
-
-        assert(X.size() == (N,8192,56,56))
-        #assert(X.size() == (N,8192,28,28))    
-        
+        assert(X.size() == (N,8192,28,28))    
         X = torch.sum(X.view(X.size()[0],X.size()[1],-1),dim = 2)
-        X = X.view(N, 8192)     
+        X = X.view(N, 8192)   
         X = torch.sqrt(X + 1e-5)
         X = torch.nn.functional.normalize(X)
         return X
 
     def forward(self, X):
-        N = X.size()[0]     #N = 12
-
-        #print("What is N????????????????/")
-        #print(N)
-
+        N = X.size()[0]
         assert X.size() == (N, 3, 448, 448)
-        
-        resize_double = torch.nn.Upsample(scale_factor = 2, mode='bilinear')
 
-        X_conv4_3 = self.features_conv4_3(X)
-
-        #print("X_conv4_3 size")
-        #print(X_conv4_3.shape)
-
-        
         X_conv5_1 = self.features_conv5_1(X)
+        print("X_conv5_1 info")
+        print(X_conv5_1.shape)
+        print(type(X_conv5_1))
+
+        min_t = torch.min(X_conv5_1)
+        max_t = torch.max(X_conv5_1)
+        print("Min of entire X_conv_51")
+        print(min_t)
+        print("Max of entire X_conv_51")
+        print(max_t)
+
+
         X_conv5_2 = self.features_conv5_2(X_conv5_1)
-        X_conv5_3 = self.features_conv5_3(X_conv5_2)
+        print("X_conv5_2 info")
+        print(X_conv5_2.shape)
+        print(type(X_conv5_2))
 
-        # print("X_conv5_1 size")
-        # print(X_conv5_1.shape)
+        # Image2PIL = transforms.ToPILImage()
+        print("TAKING MEAN ACROSS ALL CHANNELS")
+        #resize = torch.nn.Upsample(size=(448, 448), mode='linear')
+        #activation_map = resize(X_conv5_1)
+        activation_map = torch.mean(X_conv5_1, dim = 1)
+        print(activation_map.shape)
+        #print(activation_map)
+        print("min and max of average")
 
-        X_conv5_1_resize = resize_double(X_conv5_1)
-        X_conv5_2_resize = resize_double(X_conv5_2)
-        X_conv5_3_resize = resize_double(X_conv5_3)
+        min_t = torch.min(activation_map)
+        max_t = torch.max(activation_map)
+        print(torch.min(activation_map))
+        print(torch.max(activation_map))
 
-        #print("X_conv5_1_resize size")
-        # print(X_conv5_1_resize.shape)
-
-        #not sure about dimension , set to 0 for now
-        X_conv4_concat5_1 = torch.cat((X_conv4_3, X_conv5_1_resize), 1)
-        X_conv4_concat5_2 = torch.cat((X_conv4_3, X_conv5_2_resize), 1)
-        X_conv4_concat5_3 = torch.cat((X_conv4_3, X_conv5_3_resize), 1)
-
-        # print("X_conv4_concat5_1 size")
-        # print(X_conv4_concat5_1.shape)
+        #norm = torch.nn.functional.normalize(average)
+        #normal = torchvision.transforms.Normalize(mean=(0, 0, 0), std=(1, 1, 1) )
+        #norm = normal(average)
         
-        X_branch_1 = self.hbp(X_conv4_concat5_1, X_conv4_concat5_2)
-        X_branch_2 = self.hbp(X_conv4_concat5_2, X_conv4_concat5_3)
-        X_branch_3 = self.hbp(X_conv4_concat5_1, X_conv4_concat5_3)
+        norm = 255 * (activation_map - min_t) / (max_t - min_t)
+        print("Normalized output:")
+        #print(norm)
+        print(torch.min(norm))
+        print(torch.max(norm))
 
-        X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim = 1)
-      
 
-        '''
-        X_conv5_1 = self.features_conv5_1(X)
-        X_conv5_2 = self.features_conv5_2(X_conv5_1)
-        X_conv5_3 = self.features_conv5_3(X_conv5_2)
+        #resize = torch.nn.Upsample(size=(448, 448), mode='bilinear')
+        #image = resize(average)
         
-        X_branch_1 = self.hbp(X_conv5_1,X_conv5_2)
-        X_branch_2 = self.hbp(X_conv5_2,X_conv5_3)
-        X_branch_3 = self.hbp(X_conv5_1,X_conv5_3)
+        Image2PIL = transforms.ToPILImage()
+        image = Image2PIL(norm)
+        image.save(str('conv5_1.jpg'))
 
-        X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim = 1)
-        '''
+        min_t52 = torch.min(X_conv5_2)
+        max_t52 = torch.max(X_conv5_2)
+        print(torch.min(X_conv5_2))
+        print(torch.max(X_conv5_2))
 
-        # print("What is X_branch.size?????")
-        # print(X_branch.size())
+        conv52_norm = 255 * (X_conv5_2 - min_t52) / (max_t52 - min_t52)
 
-        assert X_branch.size() == (N,8192*3)
-        X = self.fc(X_branch)
-        assert X.size() == (N, 200)
+        image2_mean = torch.mean(conv52_norm, dim = 1)
+
+        image2 = Image2PIL(image2_mean)
+        image2.save(str('conv5_2.jpg'))
+
+        
+
+        #output_tensor = torch.Tensor(3, 448, 448)
+
+        #deprocess(X_conv5_1, 448, 'birdytest.jpg')
+        # print(X_conv5_1)
+        # X_conv5_2 = self.features_conv5_2(X_conv5_1)
+        # X_conv5_3 = self.features_conv5_3(X_conv5_2)
+        
+        # X_branch_1 = self.hbp(X_conv5_1,X_conv5_2)
+        # X_branch_2 = self.hbp(X_conv5_2,X_conv5_3)
+        # X_branch_3 = self.hbp(X_conv5_1,X_conv5_3)
+
+        # X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim=1)
+        # assert X_branch.size() == (N,8192*3)
+
+        # X = self.fc(X_branch)
+        # assert X.size() == (N, 200)
         return X
 
 class HBPManager(object):
-    def __init__(self, options, path):
-
-        self._options = options
+    def __init__(self, path):
+        print('Prepare the network and data.')
+        #self._options = options
         self._path = path
-
-        print(self._options)
-        print(self._path)
         # Network.
-        self._net = torch.nn.DataParallel(HBP()).cuda()
-        print(self._net)
-        # Criterion.
-        self._criterion = torch.nn.CrossEntropyLoss().cuda()
-        # Solver.
-        param_to_optim = []
-        for param in self._net.parameters():
-            if param.requires_grad == False:
-                continue
-            param_to_optim.append(param)
+        #self._net = torch.nn.DataParallel(HBP()).cuda()
+        #self._net = HBP()
+        #print(self._net)
+        self._net = torch.load(path, map_location='cpu')
+        load_model = torch.load(path, map_location='cpu')
 
-        self._solver = torch.optim.SGD(
-            param_to_optim, lr=self._options['base_lr'],
-            momentum=0.9, weight_decay=self._options['weight_decay'])
+        print('load_model')
+        #print(load_model)
+        print("attributes of object")
+        print(dir(load_model))
+        print("load_model.keys")
+        print(load_model.keys)
+        print("See here!!!!!")
+        #print(load_model.items) 
+        #print(type(load_model))
+        #print(load_model.items())
+        print(dir(load_model.items()))
 
-        milestones = [40,60,80,100]
-        self._scheduler = torch.optim.lr_scheduler.MultiStepLR(self._solver,milestones = milestones,gamma=0.25)
 
-        train_transforms = torchvision.transforms.Compose([
+
+        #hbp_load = self._net.load_state_dict(torch.load(path, map_location='cpu'), strict = False)
+
+        print("Successfully loaded model")
+
+def preprocess(image_name, image_size):
+    image = Image.open(image_name).convert('RGB')
+    train_transforms = torchvision.transforms.Compose([
             torchvision.transforms.Resize(size=448),  # Let smaller edge match
             torchvision.transforms.RandomHorizontalFlip(),
             torchvision.transforms.RandomCrop(size=448),
@@ -193,179 +189,82 @@ class HBPManager(object):
             torchvision.transforms.Normalize(mean=(0.485, 0.456, 0.406),
                                              std=(0.229, 0.224, 0.225))
         ])
-        test_transforms = torchvision.transforms.Compose([
-            torchvision.transforms.Resize(size=448),
-            torchvision.transforms.CenterCrop(size=448),
+    cropped = train_transforms(image) 
+
+    print("cropped type") #tensor
+    print(type(cropped))
+    print("cropped.shape")
+    print(cropped.shape)
+
+    cropped.data.numpy()
+
+    imgplot = plt.imshow(cropped)
+    plt.show(imgplot)
+
+    # cropped_PIL = transforms.ToPILImage(cropped)
+    # cropped_PIL.save("cropped.jpg")
+    #image_size = tuple([int((float(image_size) / max(image.size))*x) for x in (image.height, image.width)]) 
+    # Loader = transforms.Compose([transforms.Resize(image_size), transforms.ToTensor()])  # resize and convert to tensor
+    # rgb2bgr = transforms.Compose([transforms.Lambda(lambda x: x[torch.LongTensor([2,1,0])]) ])
+    # Normalize = transforms.Compose([transforms.Normalize(mean=[103.939, 116.779, 123.68], std=[1,1,1]) ]) # Subtract BGR
+    # tensor = Variable(Normalize(rgb2bgr(Loader(image) * 256))).unsqueeze(0)
+    tensor = Variable(cropped).unsqueeze(0)
+    Image2PIL = transforms.ToPILImage()
+    cropped_PIL = Image2PIL(tensor)
+    cropped_PIL.save("cropped.jpg")
+    return tensor.float(), image_size
+ 
+# Undo the above preprocessing and save the tensor as an image:
+def deprocess(output_tensor, image_size, output_name):
+    #Normalize = transforms.Compose([transforms.Normalize(mean=[-103.939, -116.779, -123.68], std=[1,1,1]) ]) # Add BGR
+    #bgr2rgb = transforms.Compose([transforms.Lambda(lambda x: x[torch.LongTensor([2,1,0])]) ])
+    #ResizeImage = transforms.Compose([transforms.Resize(image_size)])
+    #output_tensor = bgr2rgb(Normalize(output_tensor.squeeze(0))) / 256
+    output_tensor.clamp_(0, 1)
+    print("output tensor info")
+    print(output_tensor.size)
+    print(type(output_tensor))
+    print(output_tensor)
+    Image2PIL = transforms.ToPILImage()
+    image = Image2PIL(output_tensor)
+    image = ResizeImage(image)
+    image.save(str(output_name))
+
+
+def main():
+    
+    image_path = 'Laysan_Albatross_0056_500.jpg'
+    model_path = '/Users/kathydo/Documents/GitHub/pytorch-convis-master/models/HBP_all_epoch_223.pth'
+
+    im = Image.open(image_path)
+    
+    train_transforms = torchvision.transforms.Compose([
+            torchvision.transforms.Resize(size=448),  # Let smaller edge match
+            #torchvision.transforms.RandomHorizontalFlip(),
+            torchvision.transforms.RandomCrop(size=448),
             torchvision.transforms.ToTensor(),
             torchvision.transforms.Normalize(mean=(0.485, 0.456, 0.406),
                                              std=(0.229, 0.224, 0.225))
         ])
-        train_data = cub200.CUB200(
-            root=self._path['cub200'], train=True, download=True,
-            transform=train_transforms)
-        test_data = cub200.CUB200(
-            root=self._path['cub200'], train=False, download=True,
-            transform=test_transforms)
-        self._train_loader = torch.utils.data.DataLoader(
-            train_data, batch_size=self._options['batch_size'],
-            shuffle=True, num_workers=4, pin_memory=True)
-        self._test_loader = torch.utils.data.DataLoader(
-            test_data, batch_size=16,
-            shuffle=False, num_workers=4, pin_memory=True)
+    cropped = train_transforms(im)
+    # print("im.size")
+    # print(im.size)
+    # print("im")
+    # print(im)
 
-    def train(self):
-        print('Training.')
-        best_acc = 0.0
-        best_epoch = None
-        print('Epoch\tTrain loss\tTrain acc\tTest acc')
-        ii = 0
+    print("cropped.size")
+    print(cropped.shape)
 
-        ## Create summary writer in different sub folders
-        
-        tr_writer = SummaryWriter(
-        log_dir=os.path.join(self._options['log_dir'], "train"))
-        va_writer = SummaryWriter(
-        log_dir=os.path.join(self._options['log_dir'], "valid"))
-        
+    tensor = Variable(cropped).unsqueeze(0)
+    #print("tensor shape")
+    #print(tensor.shape)
 
-        #log loss and accuracy to tensorboard
-        # Create log directory and save directory if it does not exist
-        #if not os.path.exists(self._options['log_dir']):
-        #    os.makedirs(self._options['log_dir'])
-        # if not os.path.exists(self._options['save_dir']):
-        #     os.makedirs(self._options['save_dir'])
+    hbp_load = torch.load(model_path, map_location='cpu')
 
-        for t in range(self._options['epochs']):
-            epoch_loss = []
-            num_correct = 0
-            num_total = 0
-            for X, y in self._train_loader:
-                # Data.
-                X = torch.autograd.Variable(X.cuda())
-                y = torch.autograd.Variable(y.cuda(non_blocking = True))
-                # Clear the existing gradients.
-                self._solver.zero_grad()
-                # Forward pass.
-                score = self._net(X)
-                loss = self._criterion(score, y)
-                epoch_loss.append(loss.item())
-                # Prediction.
-                _, prediction = torch.max(score.data, 1)
-                num_total += y.size(0)
-                num_correct += torch.sum(prediction == y.data)
-                # Backward pass.
-                loss.backward()
-                self._solver.step()
+    #hbp_forward = hbp_load._net(tensor)
 
-                ii += 1
-                x = torch.Tensor([ii])
-                y = torch.Tensor([loss.item()])
-                #vis.line(X=x, Y=y, win='polynomial', update='append' if ii>0 else None)
-                tr_writer.add_scalar('X', x, ii)
-                tr_writer.add_scalar('Y', y, ii)
-
-
-            num_correct = torch.tensor(num_correct).float().cuda()
-            num_total = torch.tensor(num_total).float().cuda()
-
-
-            train_acc = 100 * num_correct / num_total
-            test_acc = self._accuracy(self._test_loader)
-            self._scheduler.step(test_acc)
-            if test_acc > best_acc:
-                best_acc = test_acc
-                best_epoch = t + 1
-                print('*', end='')
-                # Save model onto disk.
-                torch.save(self._net.state_dict(),
-                           os.path.join(self._path['model'],
-                                        'HBP_fc_epoch_%d.pth' % (t + 1)))
-            print('%d\t%4.3f\t\t%4.2f%%\t\t%4.2f%%' %
-                  (t+1, sum(epoch_loss) / len(epoch_loss), train_acc, test_acc))
-        print('Best at epoch %d, test accuaray %f' % (best_epoch, best_acc))
-
-    def _accuracy(self, data_loader):
-        self._net.train(False)
-        num_correct = 0
-        num_total = 0
-        for X, y in data_loader:
-            # Data.
-            X = torch.autograd.Variable(X.cuda())
-            y = torch.autograd.Variable(y.cuda(non_blocking = True))
-            # Prediction.
-            score = self._net(X)
-            _, prediction = torch.max(score.data, 1)
-            num_total += y.size(0)
-            num_correct += torch.sum(prediction == y.data)
-        self._net.train(True)  # Set the model to training phase
-        num_correct = torch.tensor(num_correct).float().cuda()
-        num_total = torch.tensor(num_total).float().cuda()
-        return 100 * num_correct / num_total
-
-    def getStat(self):
-        print('Compute mean and variance for training data.')
-        train_data = cub200.CUB200(
-            root=self._path['cub200'], train=True,
-            transform=torchvision.transforms.ToTensor(), download=True)
-        train_loader = torch.utils.data.DataLoader(
-            train_data, batch_size=1, shuffle=False, num_workers=4,
-            pin_memory=True)
-        mean = torch.zeros(3)
-        std = torch.zeros(3)
-        for X, _ in train_loader:
-            for d in range(3):
-                mean[d] += X[:, d, :, :].mean()
-                std[d] += X[:, d, :, :].std()
-        mean.div_(len(train_data))
-        std.div_(len(train_data))
-        print(mean)
-        print(std)
-
-
-def main():
-
-    parser = argparse.ArgumentParser(
-        description='Train HBP on CUB200.')
-    parser.add_argument('--base_lr', dest='base_lr', type=float, required=True,
-                        help='Base learning rate for training.')
-    parser.add_argument('--batch_size', dest='batch_size', type=int,
-                        required=True, help='Batch size.')
-    parser.add_argument('--epochs', dest='epochs', type=int,
-                        required=True, help='Epochs for training.')
-    parser.add_argument('--weight_decay', dest='weight_decay', type=float,
-                        required=True, help='Weight decay.')
-    parser.add_argument('--log_dir', dest='log_dir', type=str,
-                        required=True, help='Name of log directory.')
-    args = parser.parse_args()
-    if args.base_lr <= 0:
-        raise AttributeError('--base_lr parameter must >0.')
-    if args.batch_size <= 0:
-        raise AttributeError('--batch_size parameter must >0.')
-    if args.epochs < 0:
-        raise AttributeError('--epochs parameter must >=0.')
-    if args.weight_decay <= 0:
-        raise AttributeError('--weight_decay parameter must >0.')
-
-    options = {
-        'base_lr': args.base_lr,
-        'batch_size': args.batch_size,
-        'epochs': args.epochs,
-        'weight_decay': args.weight_decay,
-        'log_dir': args.log_dir
-    }
-
-    project_root = os.popen('pwd').read().strip()
-    path = {
-        'cub200': '/data/datasets/birds',
-        'model': os.path.join(project_root, 'model'),
-    }
-    for d in path:
-        print(path[d])
-        assert os.path.isdir(path[d])
-
-    manager = HBPManager(options, path)
-    manager.getStat()
-    manager.train()
+    print("got here")
+    #manager._net(tensor)
 
 if __name__ == '__main__':
     main()

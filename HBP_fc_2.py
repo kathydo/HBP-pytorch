@@ -26,13 +26,6 @@ class HBP(torch.nn.Module):
         #print('VGG16 Pre trained all features:')
         #print(torch.nn.Sequential(*list(self.features.children())[20:]) )
 
-        #getting conv4_3 by taking layers before maxpool
-        self.features_conv4_3 = torch.nn.Sequential(*list(self.features.children())
-                                            [:23]) 
-
-        #print("Conv 4_3. whatis it?")
-        #print(self.features_conv4_3)
-
         self.features_conv5_1 = torch.nn.Sequential(*list(self.features.children())
                                             [:-5]) 
         #self.conv5_resize = torch.nn.Upsample(scale_factor = 2, mode='bilinear')
@@ -115,15 +108,26 @@ class HBP(torch.nn.Module):
         X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim = 1)
 
         '''
+
         X_conv5_1 = self.features_conv5_1(X)
         X_conv5_2 = self.features_conv5_2(X_conv5_1)
         X_conv5_3 = self.features_conv5_3(X_conv5_2)
+
+        # print("X_conv5_1.shape")
+        # print(X_conv5_1.shape)
+
         
         X_branch_1 = self.hbp(X_conv5_1,X_conv5_2)
         X_branch_2 = self.hbp(X_conv5_2,X_conv5_3)
         X_branch_3 = self.hbp(X_conv5_1,X_conv5_3)
 
+        # print("X_branch_1.shape")
+        # print(X_branch_1.shape)
+
         X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim = 1)
+
+        # print("X_branch.shape")
+        # print(X_branch.shape)
         
         assert X_branch.size() == (N,8192*3)
         X = self.fc(X_branch)
@@ -234,7 +238,7 @@ class HBPManager(object):
                 y = torch.Tensor([loss.item()])
                 #vis.line(X=x, Y=y, win='polynomial', update='append' if ii>0 else None)
                 tr_writer.add_scalar('X', x, ii)
-                tr_writer.add_scalar('X', y, ii)
+                tr_writer.add_scalar('Y', y, ii)
 
 
             num_correct = torch.tensor(num_correct).float().cuda()
