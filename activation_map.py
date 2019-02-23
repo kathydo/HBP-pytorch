@@ -13,6 +13,8 @@ import cub200
 #import visdom
 import argparse
 
+from skimage import transform
+
 #import os
 import copy
 #import torch
@@ -68,16 +70,16 @@ class HBP(torch.nn.Module):
         assert X.size() == (N, 3, 448, 448)
 
         X_conv5_1 = self.features_conv5_1(X)
-        print("X_conv5_1 info")
-        print(X_conv5_1.shape)
-        print(type(X_conv5_1))
+        # print("X_conv5_1 info")
+        # print(X_conv5_1.shape)
+        # print(type(X_conv5_1))
 
-        min_t = torch.min(X_conv5_1)
-        max_t = torch.max(X_conv5_1)
-        print("Min of entire X_conv_51")
-        print(min_t)
-        print("Max of entire X_conv_51")
-        print(max_t)
+        min_5_1 = torch.min(X_conv5_1)
+        max_5_1 = torch.max(X_conv5_1)
+        # print("Min of entire X_conv_51")
+        # print(min_5_1)
+        # print("Max of entire X_conv_51")
+        # print(min_5_1)
 
 
         X_conv5_2 = self.features_conv5_2(X_conv5_1)
@@ -90,44 +92,96 @@ class HBP(torch.nn.Module):
         #resize = torch.nn.Upsample(size=(448, 448), mode='linear')
         #activation_map = resize(X_conv5_1)
         activation_map = torch.mean(X_conv5_1, dim = 1)
-        print(activation_map.shape)
+        #print(activation_map.shape)
         #print(activation_map)
-        print("min and max of average")
+        #print("min and max of average")
 
         min_t = torch.min(activation_map)
         max_t = torch.max(activation_map)
-        print(torch.min(activation_map))
-        print(torch.max(activation_map))
+        #print(torch.min(activation_map))
+        #print(torch.max(activation_map))
 
         #norm = torch.nn.functional.normalize(average)
         #normal = torchvision.transforms.Normalize(mean=(0, 0, 0), std=(1, 1, 1) )
         #norm = normal(average)
         
         norm = 255 * (activation_map - min_t) / (max_t - min_t)
-        print("Normalized output:")
-        #print(norm)
-        print(torch.min(norm))
-        print(torch.max(norm))
+        # print("Normalized output:")
+        # print(norm)
+        # print(torch.min(norm))
+        # print(torch.max(norm))
 
+        print("********Work for X conv5_3*********")
+
+        X_conv5_3 = self.features_conv5_3(X_conv5_2)
+        print("X_conv5_3 shape")
+        print(X_conv5_3.shape)
+
+        min_5_3 = torch.min(X_conv5_3)
+        max_5_3 = torch.max(X_conv5_3)
+        print("min 5_3:")
+        print(min_5_3)
+        print("max 5_3:")
+        print(max_5_3)
+
+        conv5_3_map = torch.mean(X_conv5_3, dim = 1)
+
+        print("After MEAN: X_conv5_3 shape")
+        print(conv5_3_map.shape)
+
+        mean_min_5_3 = torch.min(conv5_3_map)
+        mean_max_5_3 = torch.max(conv5_3_map)
+        print("mean_min 5_3:")
+        print(mean_min_5_3)
+        print("mean_max 5_3:")
+        print(mean_max_5_3)
+
+        #std = torch.std()
+
+        conv5_3_norm = (conv5_3_map - mean_min_5_3) / (mean_max_5_3 - mean_min_5_3)
+        torch.clamp(conv5_3_norm, min=0, max=255)
+        print(conv5_3_norm)
+
+        print("After Normalization")
+        norm_min_5_3 = torch.min(conv5_3_norm)
+        norm_max_5_3 = torch.max(conv5_3_norm)
+
+        print("NORM min 5_3:")
+        print(norm_min_5_3)
+        print("NORM max 5_3:")
+        print(norm_max_5_3)
+
+
+        '''
+        print("conv5_3_map")
+        print(conv5_3_map)
+
+        with torch.no_grad():
+            conv5_3_map_ng = torch.mean(X_conv5_3, dim = 1)
+
+        print("conv5_3 map no gradient")
+        print(conv5_3_map_ng)
+        '''
 
         #resize = torch.nn.Upsample(size=(448, 448), mode='bilinear')
         #image = resize(average)
         
         Image2PIL = transforms.ToPILImage()
-        image = Image2PIL(norm)
-        image.save(str('conv5_1.jpg'))
+        image = Image2PIL(conv5_3_norm)
+        img = transforms.Resize(size = 448)(image)
+        img.save(str('conv5_3_norm_resize.jpg'))
 
-        min_t52 = torch.min(X_conv5_2)
-        max_t52 = torch.max(X_conv5_2)
-        print(torch.min(X_conv5_2))
-        print(torch.max(X_conv5_2))
+        # min_t52 = torch.min(X_conv5_2)
+        # max_t52 = torch.max(X_conv5_2)
+        # print(torch.min(X_conv5_2))
+        # print(torch.max(X_conv5_2))
 
-        conv52_norm = 255 * (X_conv5_2 - min_t52) / (max_t52 - min_t52)
+        #conv52_norm = 255 * (X_conv5_2 - min_t52) / (max_t52 - min_t52)
 
-        image2_mean = torch.mean(conv52_norm, dim = 1)
+        # image2_mean = torch.mean(conv52_norm, dim = 1)
 
-        image2 = Image2PIL(image2_mean)
-        image2.save(str('conv5_2.jpg'))
+        # image2 = Image2PIL(image2_mean)
+        # image2.save(str('conv5_2.jpg'))
 
         
 
@@ -158,9 +212,19 @@ class HBPManager(object):
         #self._net = torch.nn.DataParallel(HBP()).cuda()
         #self._net = HBP()
         #print(self._net)
-        self._net = torch.load(path, map_location='cpu')
-        load_model = torch.load(path, map_location='cpu')
+        hbp_load = torch.load(path, map_location='cpu')
+        self._net = HBP()
+        #load_model = torch.load(path, map_location='cpu')
+        self._net.load_state_dict(torch.load(path, map_location='cpu'), strict = False)
+        
 
+        print("Printing parameters")  
+        #print(self._net.parameters())     
+
+        #for param in self._net.parameters():
+        #    print(param)
+
+        '''
         print('load_model')
         #print(load_model)
         print("attributes of object")
@@ -169,10 +233,11 @@ class HBPManager(object):
         print(load_model.keys)
         print("See here!!!!!")
         #print(load_model.items) 
-        #print(type(load_model))
+        print(type(load_model))
         #print(load_model.items())
-        print(dir(load_model.items()))
-
+        #print(dir(load_model.items()))
+        #print(load_model.items['bilinear_proj'])
+        '''
 
 
         #hbp_load = self._net.load_state_dict(torch.load(path, map_location='cpu'), strict = False)
@@ -241,7 +306,7 @@ def main():
     train_transforms = torchvision.transforms.Compose([
             torchvision.transforms.Resize(size=448),  # Let smaller edge match
             #torchvision.transforms.RandomHorizontalFlip(),
-            torchvision.transforms.RandomCrop(size=448),
+            torchvision.transforms.CenterCrop(size=448),
             torchvision.transforms.ToTensor(),
             torchvision.transforms.Normalize(mean=(0.485, 0.456, 0.406),
                                              std=(0.229, 0.224, 0.225))
@@ -251,17 +316,21 @@ def main():
     # print(im.size)
     # print("im")
     # print(im)
+    # Image2PIL = transforms.ToPILImage()
+    # image = Image2PIL(cropped)
+    # image.save(str('cropped_bird.jpg'))
 
-    print("cropped.size")
-    print(cropped.shape)
+    #print("cropped.size")
+    #print(cropped.shape)
 
     tensor = Variable(cropped).unsqueeze(0)
     #print("tensor shape")
     #print(tensor.shape)
 
-    hbp_load = torch.load(model_path, map_location='cpu')
-
+    #hbp_load = torch.load(model_path, map_location='cpu')
+    manager = HBPManager(model_path)
     #hbp_forward = hbp_load._net(tensor)
+    forward = manager._net(tensor)
 
     print("got here")
     #manager._net(tensor)
