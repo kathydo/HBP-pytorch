@@ -1,3 +1,15 @@
+'''
+Creates activation map overlayed onto cropped input (bird) image
+Creates and saves 5 images:
+activation_bird_relu5_1.png
+activation_bird_relu5_2.png
+activation_bird_relu5_3.png
+activation_bird_proj_5_1.png
+activation_bird_proj_5_2.png
+activation_bird_proj_5_3.png
+'''
+
+
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """Fine-tune all layers only for HBP(Hierarchical Bilinear Pooling for Fine-Grained Visual Recognition).
@@ -10,14 +22,11 @@ import os
 import torch
 import torchvision
 import cub200
-#import visdom
 import argparse
 
 from skimage import transform
 
-#import os
 import copy
-#import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision.transforms as transforms
@@ -25,42 +34,139 @@ import torchvision.transforms as transforms
 from PIL import Image
 from torch.autograd import Variable
 import matplotlib.pyplot as plt
-#from CaffeLoader import loadCaffemodel
-#from tensorboardX import SummaryWriter
-#vis = visdom.Visdom(env=u'HBP_all',use_incoming_socket=False)
+
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
 
 
-#Below is a module == neural net layer
-#It inputs and outputs layers
 class HBP(torch.nn.Module):
     def __init__(self):
         """Declare all needed layers."""
         torch.nn.Module.__init__(self)
         # Convolution and pooling layers of VGG-16.
         self.features = torchvision.models.vgg16(pretrained=False).features
+
+        self.features_conv4_3 = torch.nn.Sequential(*list(self.features.children())[:23])
+        self.resize_halve = torch.nn.Upsample(size=(28, 28), mode='bilinear')
         self.features_conv5_1 = torch.nn.Sequential(*list(self.features.children())
                                             [:-5])  
         self.features_conv5_2 = torch.nn.Sequential(*list(self.features.children())
                                             [-5:-3])  
         self.features_conv5_3 = torch.nn.Sequential(*list(self.features.children())
                                             [-3:-1])     
-        self.bilinear_proj = torch.nn.Sequential(torch.nn.Conv2d(512,8192,kernel_size=1,bias=False),
-                                        torch.nn.BatchNorm2d(8192),
+        self.bilinear_proj = torch.nn.Sequential(torch.nn.Conv2d(512,1024,kernel_size=1,bias=False),
+                                        torch.nn.BatchNorm2d(1024),
                                         torch.nn.ReLU(inplace=True))
         # Linear classifier.
-        self.fc = torch.nn.Linear(8192*3, 200)
+        self.fc = torch.nn.Linear(1024*3, 200)
 
-    def hbp(self,conv1,conv2):
+    def hbp1(self,conv1,conv2):
         N = conv1.size()[0]
         proj_1 = self.bilinear_proj(conv1)
         proj_2 = self.bilinear_proj(conv2)
-        assert(proj_1.size() == (N,8192,28,28))
+        assert(proj_1.size() == (N,1024,28,28))
         X = proj_1 * proj_2
-        assert(X.size() == (N,8192,28,28))    
+
+        bird = Image.open('cropped_bird.jpg')
+
+        X_map = torch.mean(X, dim = 1)
+
+        mean_min_X = torch.min(X_map)
+        mean_max_X = torch.max(X_map)
+        print("mean_min_X:")
+        print(mean_min_X)
+        print("mean_max X:")
+        print(mean_max_X)
+
+        X_norm = (X_map - mean_min_X) / (mean_max_X - mean_min_X)
+
+        image = transforms.ToPILImage()(X_norm)
+        img = transforms.Resize(size = 448)(image)
+
+        img.save(str('proj_5_1_feature_map.png'))
+
+        img.putalpha(200)
+
+        bird.paste(img, (0, 0), img.convert('RGBA'))
+        bird.save('activation_bird_proj_5_1.png')
+
+        assert(X.size() == (N,1024,28,28))    
         X = torch.sum(X.view(X.size()[0],X.size()[1],-1),dim = 2)
-        X = X.view(N, 8192)   
+        X = X.view(N, 1024)   
+        X = torch.sqrt(X + 1e-5)
+        X = torch.nn.functional.normalize(X)
+        return X
+
+    def hbp2(self,conv1,conv2):
+        N = conv1.size()[0]
+        proj_1 = self.bilinear_proj(conv1)
+        proj_2 = self.bilinear_proj(conv2)
+        assert(proj_1.size() == (N,1024,28,28))
+        X = proj_1 * proj_2
+
+        bird = Image.open('cropped_bird.jpg')
+
+        X_map = torch.mean(X, dim = 1)
+
+        mean_min_X = torch.min(X_map)
+        mean_max_X = torch.max(X_map)
+        print("mean_min_X:")
+        print(mean_min_X)
+        print("mean_max X:")
+        print(mean_max_X)
+
+        X_norm = (X_map - mean_min_X) / (mean_max_X - mean_min_X)
+
+        image = transforms.ToPILImage()(X_norm)
+        img = transforms.Resize(size = 448)(image)
+
+        img.save(str('proj_5_2_feature_map.png'))
+
+        img.putalpha(200)
+
+        bird.paste(img, (0, 0), img.convert('RGBA'))
+        bird.save('activation_bird_proj_5_2.png')
+
+        assert(X.size() == (N,1024,28,28))    
+        X = torch.sum(X.view(X.size()[0],X.size()[1],-1),dim = 2)
+        X = X.view(N, 1024)   
+        X = torch.sqrt(X + 1e-5)
+        X = torch.nn.functional.normalize(X)
+        return X
+
+    def hbp3(self,conv1,conv2):
+        N = conv1.size()[0]
+        proj_1 = self.bilinear_proj(conv1)
+        proj_2 = self.bilinear_proj(conv2)
+        assert(proj_1.size() == (N,1024,28,28))
+        X = proj_1 * proj_2
+
+        bird = Image.open('cropped_bird.jpg')
+
+        X_map = torch.mean(X, dim = 1)
+
+        mean_min_X = torch.min(X_map)
+        mean_max_X = torch.max(X_map)
+        print("mean_min_X:")
+        print(mean_min_X)
+        print("mean_max X:")
+        print(mean_max_X)
+
+        X_norm = (X_map - mean_min_X) / (mean_max_X - mean_min_X)
+
+        image = transforms.ToPILImage()(X_norm)
+        img = transforms.Resize(size = 448)(image)
+
+        img.save(str('proj_5_3_feature_map.png'))
+
+        img.putalpha(200)
+
+        bird.paste(img, (0, 0), img.convert('RGBA'))
+        bird.save('activation_bird_proj_5_3.png')
+
+        assert(X.size() == (N,1024,28,28))    
+        X = torch.sum(X.view(X.size()[0],X.size()[1],-1),dim = 2)
+        X = X.view(N, 1024)   
         X = torch.sqrt(X + 1e-5)
         X = torch.nn.functional.normalize(X)
         return X
@@ -69,65 +175,93 @@ class HBP(torch.nn.Module):
         N = X.size()[0]
         assert X.size() == (N, 3, 448, 448)
 
+        bird = Image.open('cropped_bird.jpg')
+        Image2PIL = transforms.ToPILImage()
+
+        X_conv4_3 = self.features_conv4_3(X)
+
+        X_conv4_3_down = self.resize_halve(X_conv4_3)
+
         X_conv5_1 = self.features_conv5_1(X)
-        # print("X_conv5_1 info")
-        # print(X_conv5_1.shape)
-        # print(type(X_conv5_1))
-
-        min_5_1 = torch.min(X_conv5_1)
-        max_5_1 = torch.max(X_conv5_1)
-        # print("Min of entire X_conv_51")
-        # print(min_5_1)
-        # print("Max of entire X_conv_51")
-        # print(min_5_1)
-
-
         X_conv5_2 = self.features_conv5_2(X_conv5_1)
-        print("X_conv5_2 info")
-        print(X_conv5_2.shape)
-        print(type(X_conv5_2))
-
-        # Image2PIL = transforms.ToPILImage()
-        print("TAKING MEAN ACROSS ALL CHANNELS")
-        #resize = torch.nn.Upsample(size=(448, 448), mode='linear')
-        #activation_map = resize(X_conv5_1)
-        activation_map = torch.mean(X_conv5_1, dim = 1)
-        #print(activation_map.shape)
-        #print(activation_map)
-        #print("min and max of average")
-
-        min_t = torch.min(activation_map)
-        max_t = torch.max(activation_map)
-        #print(torch.min(activation_map))
-        #print(torch.max(activation_map))
-
-        #norm = torch.nn.functional.normalize(average)
-        #normal = torchvision.transforms.Normalize(mean=(0, 0, 0), std=(1, 1, 1) )
-        #norm = normal(average)
-        
-        norm = 255 * (activation_map - min_t) / (max_t - min_t)
-        # print("Normalized output:")
-        # print(norm)
-        # print(torch.min(norm))
-        # print(torch.max(norm))
-
-        print("********Work for X conv5_3*********")
-
         X_conv5_3 = self.features_conv5_3(X_conv5_2)
-        print("X_conv5_3 shape")
-        print(X_conv5_3.shape)
 
-        min_5_3 = torch.min(X_conv5_3)
-        max_5_3 = torch.max(X_conv5_3)
-        print("min 5_3:")
-        print(min_5_3)
-        print("max 5_3:")
-        print(max_5_3)
+        X_conv4_add_5_1 = X_conv5_1.add(X_conv4_3_down)
+        X_conv4_add_5_2 = X_conv5_2.add(X_conv4_3_down)
+        X_conv4_add_5_3 = X_conv5_3.add(X_conv4_3_down)
 
-        conv5_3_map = torch.mean(X_conv5_3, dim = 1)
+        X_branch_1 = self.hbp1(X_conv4_add_5_1,X_conv4_add_5_2)
+        X_branch_2 = self.hbp2(X_conv4_add_5_2,X_conv4_add_5_3)
+        X_branch_3 = self.hbp3(X_conv4_add_5_1,X_conv4_add_5_3)
 
-        print("After MEAN: X_conv5_3 shape")
-        print(conv5_3_map.shape)
+        #X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim=1)
+
+        # min_5_1 = torch.min(X_conv4_add_5_1)
+        # max_5_1 = torch.max(X_conv4_add_5_1)
+        # print("min 5_1:")
+        # print(min_5_1)
+        # print("max 5_1:")
+        # print(max_5_1)
+
+        conv5_1_map = torch.mean(X_conv4_add_5_1, dim = 1)
+
+        mean_min_5_1 = torch.min(conv5_1_map)
+        mean_max_5_1 = torch.max(conv5_1_map)
+        print("mean_min 5_1:")
+        print(mean_min_5_1)
+        print("mean_max 5_1:")
+        print(mean_max_5_1)
+
+        conv5_1_norm = (conv5_1_map - mean_min_5_1) / (mean_max_5_1 - mean_min_5_1)
+
+        image = Image2PIL(conv5_1_norm)
+        img = transforms.Resize(size = 448)(image)
+
+        #img.save(str('conv5_1_feature_map.png'))
+
+        img.putalpha(200)
+
+        bird.paste(img, (0, 0), img.convert('RGBA'))
+        bird.save('activation_bird_relu5_1.png')
+
+        bird = Image.open('cropped_bird.jpg')
+
+        # min_5_2 = torch.min(X_conv4_add_5_2)
+        # max_5_2 = torch.max(X_conv4_add_5_2)
+        # print("min 5_2:")
+        # print(min_5_2)
+        # print("max 5_2:")
+        # print(max_5_2)
+
+        conv5_2_map = torch.mean(X_conv4_add_5_2, dim = 1)
+
+        mean_min_5_2 = torch.min(conv5_2_map)
+        mean_max_5_2 = torch.max(conv5_2_map)
+        print("mean_min 5_2:")
+        print(mean_min_5_2)
+        print("mean_max 5_2:")
+        print(mean_max_5_2)
+
+        conv5_2_norm = (conv5_2_map - mean_min_5_2) / (mean_max_5_2 - mean_min_5_2)
+
+        image = Image2PIL(conv5_2_norm)
+        img = transforms.Resize(size = 448)(image)
+
+        img.putalpha(200)
+
+        bird.paste(img, (0, 0), img.convert('RGBA'))
+        bird.save('activation_bird_relu5_2.png')
+
+        bird = Image.open('cropped_bird.jpg')
+
+        # min_5_3 = torch.min(X_conv4_add_5_3)
+        # max_5_3 = torch.max(X_conv4_add_5_3)
+        # print("min 5_3:")
+        # print(min_5_3)
+        # print("max 5_3:")
+        # print(max_5_3)
+
+        conv5_3_map = torch.mean(X_conv4_add_5_3, dim = 1)
 
         mean_min_5_3 = torch.min(conv5_3_map)
         mean_max_5_3 = torch.max(conv5_3_map)
@@ -136,204 +270,59 @@ class HBP(torch.nn.Module):
         print("mean_max 5_3:")
         print(mean_max_5_3)
 
-        #std = torch.std()
-
         conv5_3_norm = (conv5_3_map - mean_min_5_3) / (mean_max_5_3 - mean_min_5_3)
-        torch.clamp(conv5_3_norm, min=0, max=255)
-        print(conv5_3_norm)
 
-        print("After Normalization")
-        norm_min_5_3 = torch.min(conv5_3_norm)
-        norm_max_5_3 = torch.max(conv5_3_norm)
-
-        print("NORM min 5_3:")
-        print(norm_min_5_3)
-        print("NORM max 5_3:")
-        print(norm_max_5_3)
-
-
-        '''
-        print("conv5_3_map")
-        print(conv5_3_map)
-
-        with torch.no_grad():
-            conv5_3_map_ng = torch.mean(X_conv5_3, dim = 1)
-
-        print("conv5_3 map no gradient")
-        print(conv5_3_map_ng)
-        '''
-
-        #resize = torch.nn.Upsample(size=(448, 448), mode='bilinear')
-        #image = resize(average)
-        
-        Image2PIL = transforms.ToPILImage()
         image = Image2PIL(conv5_3_norm)
         img = transforms.Resize(size = 448)(image)
-        img.save(str('conv5_3_norm_resize.jpg'))
 
-        # min_t52 = torch.min(X_conv5_2)
-        # max_t52 = torch.max(X_conv5_2)
-        # print(torch.min(X_conv5_2))
-        # print(torch.max(X_conv5_2))
+        img.putalpha(200)
 
-        #conv52_norm = 255 * (X_conv5_2 - min_t52) / (max_t52 - min_t52)
+        bird.paste(img, (0, 0), img.convert('RGBA'))
+        bird.save('activation_bird_relu5_3.png')
 
-        # image2_mean = torch.mean(conv52_norm, dim = 1)
 
-        # image2 = Image2PIL(image2_mean)
-        # image2.save(str('conv5_2.jpg'))
-
-        
-
-        #output_tensor = torch.Tensor(3, 448, 448)
-
-        #deprocess(X_conv5_1, 448, 'birdytest.jpg')
-        # print(X_conv5_1)
-        # X_conv5_2 = self.features_conv5_2(X_conv5_1)
-        # X_conv5_3 = self.features_conv5_3(X_conv5_2)
-        
-        # X_branch_1 = self.hbp(X_conv5_1,X_conv5_2)
-        # X_branch_2 = self.hbp(X_conv5_2,X_conv5_3)
-        # X_branch_3 = self.hbp(X_conv5_1,X_conv5_3)
-
-        # X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim=1)
-        # assert X_branch.size() == (N,8192*3)
-
-        # X = self.fc(X_branch)
-        # assert X.size() == (N, 200)
         return X
-
-class HBPManager(object):
-    def __init__(self, path):
-        print('Prepare the network and data.')
-        #self._options = options
-        self._path = path
-        # Network.
-        #self._net = torch.nn.DataParallel(HBP()).cuda()
-        #self._net = HBP()
-        #print(self._net)
-        hbp_load = torch.load(path, map_location='cpu')
-        self._net = HBP()
-        #load_model = torch.load(path, map_location='cpu')
-        self._net.load_state_dict(torch.load(path, map_location='cpu'), strict = False)
-        
-
-        print("Printing parameters")  
-        #print(self._net.parameters())     
-
-        #for param in self._net.parameters():
-        #    print(param)
-
-        '''
-        print('load_model')
-        #print(load_model)
-        print("attributes of object")
-        print(dir(load_model))
-        print("load_model.keys")
-        print(load_model.keys)
-        print("See here!!!!!")
-        #print(load_model.items) 
-        print(type(load_model))
-        #print(load_model.items())
-        #print(dir(load_model.items()))
-        #print(load_model.items['bilinear_proj'])
-        '''
-
-
-        #hbp_load = self._net.load_state_dict(torch.load(path, map_location='cpu'), strict = False)
-
-        print("Successfully loaded model")
-
-def preprocess(image_name, image_size):
-    image = Image.open(image_name).convert('RGB')
-    train_transforms = torchvision.transforms.Compose([
-            torchvision.transforms.Resize(size=448),  # Let smaller edge match
-            torchvision.transforms.RandomHorizontalFlip(),
-            torchvision.transforms.RandomCrop(size=448),
-            torchvision.transforms.ToTensor(),
-            torchvision.transforms.Normalize(mean=(0.485, 0.456, 0.406),
-                                             std=(0.229, 0.224, 0.225))
-        ])
-    cropped = train_transforms(image) 
-
-    print("cropped type") #tensor
-    print(type(cropped))
-    print("cropped.shape")
-    print(cropped.shape)
-
-    cropped.data.numpy()
-
-    imgplot = plt.imshow(cropped)
-    plt.show(imgplot)
-
-    # cropped_PIL = transforms.ToPILImage(cropped)
-    # cropped_PIL.save("cropped.jpg")
-    #image_size = tuple([int((float(image_size) / max(image.size))*x) for x in (image.height, image.width)]) 
-    # Loader = transforms.Compose([transforms.Resize(image_size), transforms.ToTensor()])  # resize and convert to tensor
-    # rgb2bgr = transforms.Compose([transforms.Lambda(lambda x: x[torch.LongTensor([2,1,0])]) ])
-    # Normalize = transforms.Compose([transforms.Normalize(mean=[103.939, 116.779, 123.68], std=[1,1,1]) ]) # Subtract BGR
-    # tensor = Variable(Normalize(rgb2bgr(Loader(image) * 256))).unsqueeze(0)
-    tensor = Variable(cropped).unsqueeze(0)
-    Image2PIL = transforms.ToPILImage()
-    cropped_PIL = Image2PIL(tensor)
-    cropped_PIL.save("cropped.jpg")
-    return tensor.float(), image_size
- 
-# Undo the above preprocessing and save the tensor as an image:
-def deprocess(output_tensor, image_size, output_name):
-    #Normalize = transforms.Compose([transforms.Normalize(mean=[-103.939, -116.779, -123.68], std=[1,1,1]) ]) # Add BGR
-    #bgr2rgb = transforms.Compose([transforms.Lambda(lambda x: x[torch.LongTensor([2,1,0])]) ])
-    #ResizeImage = transforms.Compose([transforms.Resize(image_size)])
-    #output_tensor = bgr2rgb(Normalize(output_tensor.squeeze(0))) / 256
-    output_tensor.clamp_(0, 1)
-    print("output tensor info")
-    print(output_tensor.size)
-    print(type(output_tensor))
-    print(output_tensor)
-    Image2PIL = transforms.ToPILImage()
-    image = Image2PIL(output_tensor)
-    image = ResizeImage(image)
-    image.save(str(output_name))
 
 
 def main():
     
-    image_path = 'Laysan_Albatross_0056_500.jpg'
-    model_path = '/Users/kathydo/Documents/GitHub/pytorch-convis-master/models/HBP_all_epoch_223.pth'
+    image_path = '/Users/kathydo/Documents/GitHub/birds/birds_ex_paper/Black_Footed_Albatross_0064_796101.jpg'
+    model_path = 'HBP_all_c45_epoch_142.pth'
 
     im = Image.open(image_path)
     
     train_transforms = torchvision.transforms.Compose([
-            torchvision.transforms.Resize(size=448),  # Let smaller edge match
-            #torchvision.transforms.RandomHorizontalFlip(),
+            torchvision.transforms.Resize(size=448), 
             torchvision.transforms.CenterCrop(size=448),
-            torchvision.transforms.ToTensor(),
-            torchvision.transforms.Normalize(mean=(0.485, 0.456, 0.406),
-                                             std=(0.229, 0.224, 0.225))
+            torchvision.transforms.ToTensor()
         ])
     cropped = train_transforms(im)
-    # print("im.size")
-    # print(im.size)
-    # print("im")
-    # print(im)
-    # Image2PIL = transforms.ToPILImage()
-    # image = Image2PIL(cropped)
-    # image.save(str('cropped_bird.jpg'))
 
-    #print("cropped.size")
-    #print(cropped.shape)
+    Image2PIL = transforms.ToPILImage()
+    bird = Image2PIL(cropped)
+    bird.save(str('cropped_bird.jpg'))
 
+    #normalize image
+    cropped = torchvision.transforms.Normalize(mean=(0.485, 0.456, 0.406),
+                                             std=(0.229, 0.224, 0.225))(cropped)
     tensor = Variable(cropped).unsqueeze(0)
-    #print("tensor shape")
-    #print(tensor.shape)
+    
+    model = HBP()
 
-    #hbp_load = torch.load(model_path, map_location='cpu')
-    manager = HBPManager(model_path)
-    #hbp_forward = hbp_load._net(tensor)
-    forward = manager._net(tensor)
+    device = torch.device('cpu')
+    state_dict = torch.load(model_path, map_location='cpu')
 
-    print("got here")
-    #manager._net(tensor)
+    # create new OrderedDict that does not contain `module.`
+    from collections import OrderedDict
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k[7:] # remove `module.`
+        new_state_dict[name] = v
+    # load params
+    model.load_state_dict(new_state_dict)
+    model = model.eval()
+
+    model.forward(tensor)
 
 if __name__ == '__main__':
     main()

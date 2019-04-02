@@ -74,7 +74,7 @@ class HBP(torch.nn.Module):
         X_branch_3 = self.hbp(X_conv4_add_5_1,X_conv4_add_5_3)
 
         X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim=1)
-        assert X_branch.size() == (N,512*3)
+        assert X_branch.size() == (N,1024*3)
 
         X = self.fc(X_branch)
         assert X.size() == (N, 200)
@@ -164,8 +164,9 @@ class HBPManager(object):
                 _, prediction = torch.max(score.data, 1)
                 num_total += y.size(0)
                 num_correct += torch.sum(prediction == y.data)
-                # Backward pass.
+                # Backward pass. Compute gradients.
                 loss.backward()
+                #Updates the gradients by step value
                 self._solver.step()
 
                 ii += 1
