@@ -159,9 +159,17 @@ class HBPManager(object):
         test_data = cub200.CUB200(
             root=self._path['cub200'], train=False, download=True,
             transform=test_transforms)
+        #added to train on one batch
+        batch_indices = [536,54,4400,1769,1518,1287,5554,4919,2547,2249,5757,589] #12 indices
+
+        subset_sampler = torch.utils.data.sampler.SubsetRandomSampler(batch_indices)
+
         self._train_loader = torch.utils.data.DataLoader(
             train_data, batch_size=self._options['batch_size'],
-            shuffle=True, num_workers=4, pin_memory=True)
+            shuffle=False, sampler=subset_sampler, num_workers=4, pin_memory=True)
+        # self._train_loader = torch.utils.data.DataLoader(
+        #     train_data, batch_size=self._options['batch_size'],
+        #     shuffle=True, num_workers=4, pin_memory=True)
         self._test_loader = torch.utils.data.DataLoader(
             test_data, batch_size=16,
             shuffle=False, num_workers=4, pin_memory=True)

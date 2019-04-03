@@ -9,83 +9,14 @@ import torch
 import torchvision
 import cub200
 import argparse
-import numpy as np
+from torch.autograd import Variable
 
 from tensorboardX import SummaryWriter
-
-from torch.autograd import Variable
 
 from pytorch_mask_rcnn.roialign.roi_align.crop_and_resize import CropAndResizeFunction
 
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
-
-def generate_anchors(base_size=16, ratios=[0.5, 1, 2],
-                     scales=2**np.arange(3, 6)):
-
-    sub_sample = 16
-    ratio = [0.5, 1, 2]
-    anchor_scales = [4, 8, 16]
-
-    fe_size = (448//16) #28
-
-    #crearting centers from first location at feature map location (1,1)
-    ctr_x = np.arange(32, (fe_size) * 16, 16)
-    ctr_y = np.arange(32, (fe_size) * 16, 16)
-
-    '''
-    Now ctr x is take off first and last layer of pixels
-    ctr_x.shape
-    (26,)
-    [ 32  48  64  80  96 112 128 144 160 176 192 208 224 240 256 272 288 304
- 320 336 352 368 384 400 416 432]
-    '''
-    #There are 26 * 26 locations from feature map
-    ctr = np.zeros((26 * 26, 2))
-
-    #creating centre coordinates
-    index = 0
-    for x in range(len(ctr_x)):
-        for y in range(len(ctr_y)):
-            ctr[index, 1] = ctr_x[x] - 8
-            ctr[index, 0] = ctr_y[y] - 8
-            index +=1
-
-    #creating anchor array
-    anchors = np.zeros((26 * 26 * 9, 4))
-    index = 0
-    
-    #generate all anchor locations
-    for c in ctr:
-      ctr_y, ctr_x = c
-      for i in range(len(ratios)):
-        for j in range(len(anchor_scales)):
-          h = sub_sample * anchor_scales[j] * np.sqrt(ratios[i])
-          w = sub_sample * anchor_scales[j] * np.sqrt(1./ ratios[i])
-          
-          anchors[index, 0] = ctr_y - h / 2.
-          anchors[index, 1] = ctr_x - w / 2.
-          anchors[index, 2] = ctr_y + h / 2.
-          anchors[index, 3] = ctr_x + w / 2.
-          index += 1
-
-    #get indexes of invalid boxes
-    invalid_index = np.where(
-        (anchors[:, 0] < 0) |
-        (anchors[:, 1] < 0) |
-        (anchors[:, 2] > 448) |
-        (anchors[:, 3] > 448)
-    )[0]
-
-    #set all invalid anchors to 0
-    anchors[invalid_index] = [0,0,0,0]
-
-    #scale anchors coordinates to in range (0,1)
-    scaled_anchors = anchors / 448
-
-    tensor_anchors = torch.tensor(scaled_anchors, dtype=torch.float)
-
-    return tensor_anchors
 
 class HBP(torch.nn.Module):
     def __init__(self):
@@ -101,30 +32,12 @@ class HBP(torch.nn.Module):
                                             [-5:-3])  
         self.features_conv5_3 = torch.nn.Sequential(*list(self.features.children())
                                             [-3:-1])     
-
+        # self.bilinear_proj = torch.nn.Sequential(torch.nn.Conv2d(512,8192,kernel_size=1,bias=False),
+        #                                 torch.nn.BatchNorm2d(8192),
+        #                                 torch.nn.ReLU(inplace=True))
         self.bilinear_proj = torch.nn.Sequential(torch.nn.Conv2d(512,1024,kernel_size=1,bias=False),
                                         torch.nn.BatchNorm2d(1024),
                                         torch.nn.ReLU(inplace=True))
-        
-        #DEFINE RPN
-        self.crop_height = 7
-        self.crop_width = 7
-        self.anchors = generate_anchors()
-        self.n_anchor = 9 # Number of anchors at each location
-        self.rpn_conv = torch.nn.Conv2d(512, 512, kernel_size = 3,  stride = 1, padding = 0)
-        
-        self.rpn_cls_layer = torch.nn.Conv2d(512, 9, kernel_size = 1, stride = 1, padding = 0)
-
-        self.sigmoid = torch.nn.Sigmoid()
-
-        # init conv sliding layer
-        self.rpn_conv.weight.data.normal_(0, 0.01)
-        self.rpn_conv.bias.data.zero_()
-
-        # init classification layer
-        self.rpn_cls_layer.weight.data.normal_(0, 0.01)
-        self.rpn_cls_layer.bias.data.zero_()
-
         # Linear classifier.
         self.fc = torch.nn.Linear(1024*3, 200)
 
@@ -161,10 +74,16 @@ class HBP(torch.nn.Module):
         proj_1 = self.bilinear_proj(conv1)
         proj_2 = self.bilinear_proj(conv2)
         assert(proj_1.size() == (N,1024,7,7))
+        # print('proj_1.shape')
+        # print(proj_1.shape)
+        # print('proj_2.shape')
+        # print(proj_2.shape)
 
-        #get interactions between projections
         X = proj_1 * proj_2
 
+        # print('X')
+        # print(type(X))
+        # print(X.shape)
         assert(X.size() == (N,1024,7,7))    
         X = torch.sum(X.view(X.size()[0],X.size()[1],-1),dim = 2)
         X = X.view(N, 1024)     
@@ -176,24 +95,14 @@ class HBP(torch.nn.Module):
         N = X.size()[0]
         assert X.size() == (N, 3, 448, 448)
 
-        anchors = self.anchors
+        #adding cropping settings for roialign
+        box = torch.tensor([[0, 0, 1, 1]], dtype=torch.float64).cuda()
+        boxes_data = torch.cat(([box] * N),0)
 
-        #get tensor of all anchors coordinates for N samples
-        anchors = torch.cat(([anchors] * N),0)
+        box_index_data = torch.zeros(N, dtype=torch.int32)
 
-        boxes_data = torch.tensor(anchors, dtype=torch.float64)
-
-        #going through code to integrate HBP_anchors to here.
-        #use some pytorch operation like expand or repeat to 
-        #get box_index concattenated
-
-        box_index_data = torch.tensor(range(N), dtype=torch.int32)
-        box_index_data = box_index_data.repeat(6084,1)
-        box_index_data = box_index_data.transpose(0,1)
-        box_index_data = box_index_data.reshape(N*6084)
-
-        boxes = Variable(boxes_data, requires_grad=False)
-        box_index = Variable(box_index_data, requires_grad=False)
+        boxes = Variable(boxes_data, requires_grad=False).cuda()
+        box_index = Variable(box_index_data, requires_grad=False).cuda()
 
         X_conv4_3 = self.features_conv4_3(X)
 
@@ -207,60 +116,20 @@ class HBP(torch.nn.Module):
         X_conv4_add_5_2 = X_conv5_2.add(X_conv4_3_down)
         X_conv4_add_5_3 = X_conv5_3.add(X_conv4_3_down)
 
-        #Set above feature maps to requires_grad = False for cropping
+        X_conv451_crop = CropAndResizeFunction(7, 7, 0)(X_conv4_add_5_1, boxes, box_index)
 
-        X_fmap_1 = Variable(X_conv4_add_5_1, requires_grad=False)
-        X_fmap_2 = Variable(X_conv4_add_5_2, requires_grad=False)
-        X_fmap_3 = Variable(X_conv4_add_5_3, requires_grad=False)
+        X_conv452_crop = CropAndResizeFunction(7, 7, 0)(X_conv4_add_5_2, boxes, box_index)
 
-        #Cropping feature maps to 7x7 boxes
-        X_fmap_1_cropped = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_fmap_1, boxes, box_index)
-        X_fmap_2_cropped = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_fmap_2, boxes, box_index)
-        X_fmap_3_cropped = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_fmap_3, boxes, box_index)
+        X_conv453_crop = CropAndResizeFunction(7, 7, 0)(X_conv4_add_5_3, boxes, box_index)
         
-        #reshape to match rpn output
-        X_fmap_1_reshape = np.reshape(X_fmap_1_cropped, (N, 9, 26, 26, 512,7,7))
-        X_fmap_2_reshape = np.reshape(X_fmap_2_cropped, (N, 9, 26, 26, 512,7,7))
-        X_fmap_3_reshape = np.reshape(X_fmap_3_cropped, (N, 9, 26, 26, 512,7,7))
-
-        #Apply RPN
-        rpn_conv1 = self.rpn_conv(X_conv4_add_5_1)
-        rpn_conv2 = self.rpn_conv(X_conv4_add_5_2)
-        rpn_conv3 = self.rpn_conv(X_conv4_add_5_3)
-
-        cls_scores_1 = self.rpn_cls_layer(rpn_conv1)
-        cls_scores_2 = self.rpn_cls_layer(rpn_conv1)
-        cls_scores_3 = self.rpn_cls_layer(rpn_conv1)
-
-        rpn_scores_1 = self.sigmoid(cls_scores_1)
-        rpn_scores_2 = self.sigmoid(cls_scores_2)
-        rpn_scores_3 = self.sigmoid(cls_scores_3)
-
-        #is there a better way using view()?
-        rpn_scores_reshape_1 = rpn_scores_1.view(N, 9, 26, 26, 1, 1, 1)
-        rpn_scores_reshape_2 = rpn_scores_2.view(N, 9, 26, 26, 1, 1, 1)
-        rpn_scores_reshape_3 = rpn_scores_3.view(N, 9, 26, 26, 1, 1, 1)
-
-        rpn_sum_1 = torch.sum(rpn_scores_1)
-        rpn_sum_2 = torch.sum(rpn_scores_2)
-        rpn_sum_3 = torch.sum(rpn_scores_3)
-
-        weighted_sc_num_1 = rpn_scores_reshape_1 * X_fmap_1_reshape
-        weighted_sc_num_2 = rpn_scores_reshape_2 * X_fmap_2_reshape
-        weighted_sc_num_3 = rpn_scores_reshape_3 * X_fmap_3_reshape
-
-        sum_num_1 = torch.sum(weighted_sc_num_1, dim = (1,2,3))
-        sum_num_2 = torch.sum(weighted_sc_num_2, dim = (1,2,3))
-        sum_num_3 = torch.sum(weighted_sc_num_3, dim = (1,2,3))
-
-        weighted_score_1 = sum_num_1/rpn_sum_1
-        weighted_score_2 = sum_num_2/rpn_sum_2
-        weighted_score_3 = sum_num_3/rpn_sum_3
-
-        X_branch_1 = self.hbp(weighted_score_1, weighted_score_2)
-        X_branch_2 = self.hbp(weighted_score_2, weighted_score_3)
-        X_branch_3 = self.hbp(weighted_score_1, weighted_score_3)
-
+        X_branch_1 = self.hbp(X_conv451_crop,X_conv452_crop)
+        X_branch_2 = self.hbp(X_conv452_crop,X_conv453_crop)
+        X_branch_3 = self.hbp(X_conv451_crop,X_conv453_crop)
+        '''
+        X_branch_1 = self.hbp(X_conv4_add_5_1,X_conv4_add_5_2)
+        X_branch_2 = self.hbp(X_conv4_add_5_2,X_conv4_add_5_3)
+        X_branch_3 = self.hbp(X_conv4_add_5_1,X_conv4_add_5_3)
+        '''
         X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim = 1)
         assert X_branch.size() == (N,1024*3)
         X = self.fc(X_branch)
@@ -311,7 +180,6 @@ class HBPManager(object):
         test_data = cub200.CUB200(
             root=self._path['cub200'], train=False, download=True,
             transform=test_transforms)
-
         #added to train on one batch
         batch_indices = [536,54,4400,1769,1518,1287,5554,4919,2547,2249,5757,589] #12 indices
 
@@ -323,9 +191,8 @@ class HBPManager(object):
         # self._train_loader = torch.utils.data.DataLoader(
         #     train_data, batch_size=self._options['batch_size'],
         #     shuffle=True, num_workers=4, pin_memory=True)
-
         self._test_loader = torch.utils.data.DataLoader(
-            test_data, batch_size=1,
+            test_data, batch_size=16,
             shuffle=False, num_workers=4, pin_memory=True)
 
     def train(self):
@@ -385,7 +252,6 @@ class HBPManager(object):
                            os.path.join(self._path['model'],
                                         'HBP_fc_1024_epoch_%d.pth' % (t + 1)))
             
-
             tr_writer.add_scalar('Training Loss', sum(epoch_loss) / len(epoch_loss), t + 1)
             tr_writer.add_scalar('Training Accuracy', train_acc, t + 1)
             va_writer.add_scalar('Validation Accuracy', test_acc, t + 1)
@@ -436,8 +302,6 @@ class HBPManager(object):
 
 def main():
 
-    '''
-
     parser = argparse.ArgumentParser(
         description='Train HBP on CUB200.')
     parser.add_argument('--base_lr', dest='base_lr', type=float, required=True,
@@ -459,20 +323,13 @@ def main():
         raise AttributeError('--epochs parameter must >=0.')
     if args.weight_decay <= 0:
         raise AttributeError('--weight_decay parameter must >0.')
-    '''
-
-    base_lr = 1.0
-    batch_size = 12
-    epochs = 120
-    weight_decay = 0.000005
-    log_dir = 'logs_fc_rpn'
 
     options = {
-        'base_lr': base_lr,
-        'batch_size': batch_size,
-        'epochs': epochs,
-        'weight_decay': weight_decay,
-        'log_dir': log_dir,
+        'base_lr': args.base_lr,
+        'batch_size': args.batch_size,
+        'epochs': args.epochs,
+        'weight_decay': args.weight_decay,
+        'log_dir': args.log_dir,
     }
 
     project_root = os.popen('pwd').read().strip()

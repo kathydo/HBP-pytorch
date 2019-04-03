@@ -98,8 +98,8 @@ class HBP(torch.nn.Module):
         N = X.size()[0]
         assert X.size() == (N, 3, 448, 448)
 
-        box = torch.tensor([[0, 0, 1, 1]], dtype=torch.float64).cuda()
-        #box = np.array([[0, 0, 1, 1]])
+        #boxes_data = torch.FloatTensor([[0, 0, 1, 1]], dtype=torch.float64)
+        box = np.array([[0, 0, 1, 1]])
         '''
         print("box type")
         print(type(box))
@@ -133,25 +133,30 @@ class HBP(torch.nn.Module):
         X_conv4_add_5_2 = X_conv5_2.add(X_conv4_3_down)
         X_conv4_add_5_3 = X_conv5_3.add(X_conv4_3_down)
 
-        print("X_conv5_1")
-        print(X_conv5_1)
+        X_conv451_torch = Variable(X_conv4_add_5_1, requires_grad=False).cuda()
+
+        X_conv451_crop = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_conv451_torch, boxes, box_index)
+
+        # X_conv451_crop = Variable(X_conv451_crop, requires_grad=True)
+        #X_conv451_crop = Variable(X_conv451_crop, requires_grad=True)
 
 
-        X_conv451_crop = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_conv4_add_5_1, boxes, box_index)
+        X_conv452_torch = Variable(X_conv4_add_5_2, requires_grad=False)
 
-        X_conv452_crop = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_conv4_add_5_2, boxes, box_index)
+        X_conv452_crop = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_conv452_torch, boxes, box_index)
+
+        # X_conv452_crop = Variable(X_conv452_crop, requires_grad=True)
+
+
+        X_conv453_torch = Variable(X_conv4_add_5_3, requires_grad=False)
 
         X_conv453_crop = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_conv4_add_5_3, boxes, box_index)
         
-        print("X_conv451_crop")
-        print(X_conv451_crop)
+        # X_conv453_crop = Variable(X_conv453_crop, requires_grad=True)
 
         X_branch_1 = self.hbp(X_conv451_crop,X_conv452_crop)
         X_branch_2 = self.hbp(X_conv452_crop,X_conv453_crop)
         X_branch_3 = self.hbp(X_conv451_crop,X_conv453_crop)
-
-        # print("X_branch_1")
-        # print(X_branch_1)
 
         X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim = 1)
         
@@ -180,12 +185,12 @@ class HBPManager(object):
                 continue
             param_to_optim.append(param)
 
-        # Using ADAM
+        # Abhi:
         self._solver = torch.optim.Adam(
             param_to_optim, lr=self._options['base_lr'],
             weight_decay=self._options['weight_decay'])
 
-        # Commented 
+        # Commented by Abhi
         # self._solver = torch.optim.SGD(
         #     param_to_optim, lr=self._options['base_lr'],
         #     momentum=0.9, weight_decay=self._options['weight_decay'])
@@ -214,39 +219,26 @@ class HBPManager(object):
         test_data = cub200.CUB200(
             root=self._path['cub200'], train=False, download=True,
             transform=test_transforms)
-
-        batch_indices = [536,54,4400,1769,1518,1287,5554,4919,2547,2249,5757,589] #12 indices
-        '''
-        5508,3672,4026,2859,1701,3799,5087,2493,3256,5808,4979,3464,4302,4653,3412,
-        5356,4758,2591,3814,2814,2647,3535,4422,4417,1810,1946,2256,2536,3457,5382,
-        4850,3930,306,2658,3066,298,109,4691,2458,4867,5841,1283,640,3646,5635,4700,
-        2306,5317,5666,595,4930,4011,906,3592,1372,3972,3415,594,1364,4541,4727,5026,
-        1939,2917,347,5931,970,622,5380,2673,1145,1339,3743,1192,1606,1075,5740,2909,
-        4918,3315,3741,1486,149,3765,3123,1756,5098]
-        '''
-        subset_sampler = torch.utils.data.sampler.SubsetRandomSampler(batch_indices)
-
         self._train_loader = torch.utils.data.DataLoader(
             train_data, batch_size=self._options['batch_size'],
-            shuffle=False, sampler=subset_sampler, num_workers=4, pin_memory=True)
-            #shuffle=True, num_workers=4, pin_memory=True) #changed to shuffle=false for one batch
+            shuffle=False, num_workers=4, pin_memory=True)
+            #shuffle=True, num_workers=4, pin_memory=True) #changed to false for one batch
         self._test_loader = torch.utils.data.DataLoader(
             test_data, batch_size=self._options['test_batch_size'],
             shuffle=False, num_workers=4, pin_memory=True)
 
     def train(self):
-        #print('Training.')
+        print('Training.')
         best_acc = 0.0
         best_epoch = None
-        #print('Epoch\tTrain loss\tTrain acc\tTest acc')
+        print('Epoch\tTrain loss\tTrain acc\tTest acc')
         ii = 0
 
-        '''
         tr_writer = SummaryWriter(
         log_dir=os.path.join(self._options['log_dir'], "train"))
         va_writer = SummaryWriter(
         log_dir=os.path.join(self._options['log_dir'], "valid"))
-        '''
+
         iteration = 0
         for t in range(self._options['epochs']):
             epoch_loss = []
@@ -254,16 +246,38 @@ class HBPManager(object):
             num_total = 0
             self._net.train()
             self._scheduler.step()
+            #Run on one batch first
+            '''
+            X, y = next(iter(self._train_loader))
+            X = torch.autograd.Variable(X.cuda())
+            y = torch.autograd.Variable(y.cuda(non_blocking = True))
+            # Clear the existing gradients.
+            self._solver.zero_grad()
+            # Forward pass.
+            score = self._net(X)
+            loss = self._criterion(score, y)
+            epoch_loss.append(loss.item())
+            # Prediction.
+            _, prediction = torch.max(score.data, 1)
+            num_total += y.size(0)
+            num_correct += torch.sum(prediction == y.data)
+            # Backward pass.
+            loss.backward()
+            self._solver.step()
+
+            ii += 1
+            x = torch.Tensor([ii])
+            y = torch.Tensor([loss.item()])
+            '''
+
             counter = 0
             for batch_idx, (X, y) in enumerate(self._train_loader):
                 counter += 1
                 # Data.
+                #Do I need Variable here?
                 # X = torch.autograd.Variable(X.cuda())
                 # y = torch.autograd.Variable(y.cuda(non_blocking = True))
                 X, y = X.cuda(), y.cuda()
-
-                # print("X.size")
-                # print(X.shape)
                 # Clear the existing gradients.
                 self._solver.zero_grad()
                 # Forward pass.
@@ -275,14 +289,14 @@ class HBPManager(object):
 
                 iteration += 1
                 #Start logging
-                if iteration % 12 == 0:
+                if iteration % 100 == 0:
                     # Add the values to Summary Writer
                     # self.writer.add_scalar('train/loss', loss.item(), self.args.iter_count)
                     # train_acc = 100 * num_correct / num_total
                     
                 # epoch_loss.append(loss.item())
 
-                    # Prediction for current batch
+                    # Prediction.
                     _, prediction = torch.max(score.data, 1)
                     num_total = y.size(0)
                     num_correct = torch.sum(prediction == y.data)
@@ -290,9 +304,56 @@ class HBPManager(object):
                     train_acc = 100 * num_correct / num_total
                     # print("train_acc:", train_acc.item())
 
-                    print('Train Epoch: {} Iteration: {} Processed: [{}/{} ({:.0f}%)]\tLoss_tr: {:.6f} \tTrain_Acc: {:.2f} '.format(
-                        t, iteration, batch_idx * len(X), len(self._train_loader.dataset),
+                    print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss_tr: {:.6f} \tTrain_Acc: {:.2f} '.format(
+                        t, batch_idx * len(X), len(self._train_loader.dataset),
                         100. * batch_idx / len(self._train_loader), loss.item(), train_acc.item()))
+                # break;
+                    # Validation
+                    # self._net.eval()
+                    # test_acc, loss_test = self._accuracy(self._test_loader)
+
+                    # print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss_tr: {:.6f} \tLoss_test: {:.6f} \tTrain_Acc: {:.6f} \tTest_Acc: {:.6f}'.format(
+                    #     t, batch_idx * len(X), len(self._train_loader.dataset),
+                    #     100. * batch_idx / len(self._train_loader), loss.item(), loss_test, train_acc.item(), test_acc))
+
+                    # # \tTest_Acc: {:.6f} , test_acc
+                    # # Bring back to train mode
+                    # self._net.train()
+
+                
+
+                # ii += 1
+                # x = torch.Tensor([ii])
+                # y = torch.Tensor([loss.item()])
+            
+
+        #     #num_correct = torch.tensor(num_correct).float().cuda()
+        #     num_correct = num_correct.clone().detach().float().cuda()
+        #     #num_correct = num_correct.clone().detach().requires_grad_(True).float()
+
+        #     num_total = torch.tensor(num_total).float().cuda()
+        #     #num_total = num_total.clone().detach().float().cuda()
+
+        #     train_acc = 100 * num_correct / num_total
+        #     test_acc = self._accuracy(self._test_loader)
+            # self._scheduler.step(test_acc)
+            # if test_acc > best_acc:
+            #     best_acc = test_acc
+            #     best_epoch = t + 1
+            #     print('*', end='')
+            #     # Save model onto disk.
+            #     torch.save(self._net.state_dict(),
+            #                os.path.join(self._path['model'],
+            #                             'HBP_fc_roialign_epoch_%d.pth' % (t + 1)))
+            
+        #     tr_writer.add_scalar('Training Loss', sum(epoch_loss) / len(epoch_loss), t + 1)
+        #     tr_writer.add_scalar('Training Accuracy', train_acc, t + 1)
+        #     va_writer.add_scalar('Validation Accuracy', test_acc, t + 1)
+            
+        #     print('%d\t%4.3f\t\t%4.2f%%\t\t%4.2f%%' %
+        #           (t+1, sum(epoch_loss) / len(epoch_loss), train_acc, test_acc))
+
+        # print('Best at epoch %d, test accuaray %f' % (best_epoch, best_acc))
 
     def _accuracy(self, data_loader):
         # self._net.train(False) # Abhi
@@ -338,42 +399,41 @@ class HBPManager(object):
 
 def main():
 
-    parser = argparse.ArgumentParser(
-        description='Train HBP on CUB200.')
-    parser.add_argument('--base_lr', dest='base_lr', type=float, required=True,
-                        help='Base learning rate for training.')
-    parser.add_argument('--batch_size', dest='batch_size', type=int,
-                        required=True, help='Batch size.')
-    parser.add_argument('--epochs', dest='epochs', type=int,
-                        required=True, help='Epochs for training.')
-    parser.add_argument('--weight_decay', dest='weight_decay', type=float,
-                        required=True, help='Weight decay.')
-    parser.add_argument('--log_dir', dest='log_dir', type=str,
-                        required=False, help='Name of log directory.')
-    args = parser.parse_args()
-    if args.base_lr <= 0:
-        raise AttributeError('--base_lr parameter must >0.')
-    if args.batch_size <= 0:
-        raise AttributeError('--batch_size parameter must >0.')
-    if args.epochs < 0:
-        raise AttributeError('--epochs parameter must >=0.')
-    if args.weight_decay <= 0:
-        raise AttributeError('--weight_decay parameter must >0.')
+    # parser = argparse.ArgumentParser(
+    #     description='Train HBP on CUB200.')
+    # parser.add_argument('--base_lr', dest='base_lr', type=float, required=True,
+    #                     help='Base learning rate for training.')
+    # parser.add_argument('--batch_size', dest='batch_size', type=int,
+    #                     required=True, help='Batch size.')
+    # parser.add_argument('--epochs', dest='epochs', type=int,
+    #                     required=True, help='Epochs for training.')
+    # parser.add_argument('--weight_decay', dest='weight_decay', type=float,
+    #                     required=True, help='Weight decay.')
+    # parser.add_argument('--log_dir', dest='log_dir', type=str,
+    #                     required=True, help='Name of log directory.')
+    # args = parser.parse_args()
+    # if args.base_lr <= 0:
+    #     raise AttributeError('--base_lr parameter must >0.')
+    # if args.batch_size <= 0:
+    #     raise AttributeError('--batch_size parameter must >0.')
+    # if args.epochs < 0:
+    #     raise AttributeError('--epochs parameter must >=0.')
+    # if args.weight_decay <= 0:
+    #     raise AttributeError('--weight_decay parameter must >0.')
 
-    # base_lr = 3e-3
-    # batch_size = 8
-    # epochs = 120
-    # weight_decay = 0.000005  # Default val: 0.000005
-    # log_dir = 'logs_fc_roialign'
-
+    base_lr = 3e-3
+    batch_size = 8
+    epochs = 120
+    weight_decay = 0.000005  # Default val: 0.000005
+    log_dir = 'logs_fc_roialign'
     test_batch_size = 1
 
     options = {
-        'base_lr': args.base_lr,
-        'batch_size': args.batch_size,
-        'epochs': args.epochs,
-        'weight_decay': args.weight_decay,
-        #'log_dir': args.log_dir,
+        'base_lr': base_lr,
+        'batch_size': batch_size,
+        'epochs': epochs,
+        'weight_decay': weight_decay,
+        'log_dir': log_dir,
         'test_batch_size' : test_batch_size
     }
 

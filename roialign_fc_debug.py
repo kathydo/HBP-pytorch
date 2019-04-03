@@ -3,6 +3,11 @@
 """Fine-tune the fc layer only for  HBP(Hierarchical Bilinear Pooling for Fine-Grained Visual Recognition).
 Usage:
     CUDA_VISIBLE_DEVICES=0,1 python HBP_fc.py --base_lr 1.0 --batch_size 12 --epochs 120 --weight_decay 0.000005 | tee 'hbp_fc.log'
+
+Kingwood:
+python HBP_fc_roialign.py --base_lr 1.0 --batch_size 12 --epochs 120 --weight_decay 0.000005 --log_dir logs_fc_roialign | tee 'hbp_fc_roialign_mar_27.log'
+
+
 """
 import os
 import torch
@@ -20,78 +25,12 @@ from pytorch_mask_rcnn.roialign.roi_align.crop_and_resize import CropAndResizeFu
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
 
-def generate_anchors(base_size=16, ratios=[0.5, 1, 2],
-                     scales=2**np.arange(3, 6)):
-
-    sub_sample = 16
-    ratio = [0.5, 1, 2]
-    anchor_scales = [4, 8, 16]
-
-    fe_size = (448//16) #28
-
-    #crearting centers from first location at feature map location (1,1)
-    ctr_x = np.arange(32, (fe_size) * 16, 16)
-    ctr_y = np.arange(32, (fe_size) * 16, 16)
-
-    '''
-    Now ctr x is take off first and last layer of pixels
-    ctr_x.shape
-    (26,)
-    [ 32  48  64  80  96 112 128 144 160 176 192 208 224 240 256 272 288 304
- 320 336 352 368 384 400 416 432]
-    '''
-    #There are 26 * 26 locations from feature map
-    ctr = np.zeros((26 * 26, 2))
-
-    #creating centre coordinates
-    index = 0
-    for x in range(len(ctr_x)):
-        for y in range(len(ctr_y)):
-            ctr[index, 1] = ctr_x[x] - 8
-            ctr[index, 0] = ctr_y[y] - 8
-            index +=1
-
-    #creating anchor array
-    anchors = np.zeros((26 * 26 * 9, 4))
-    index = 0
-    
-    #generate all anchor locations
-    for c in ctr:
-      ctr_y, ctr_x = c
-      for i in range(len(ratios)):
-        for j in range(len(anchor_scales)):
-          h = sub_sample * anchor_scales[j] * np.sqrt(ratios[i])
-          w = sub_sample * anchor_scales[j] * np.sqrt(1./ ratios[i])
-          
-          anchors[index, 0] = ctr_y - h / 2.
-          anchors[index, 1] = ctr_x - w / 2.
-          anchors[index, 2] = ctr_y + h / 2.
-          anchors[index, 3] = ctr_x + w / 2.
-          index += 1
-
-    #get indexes of invalid boxes
-    invalid_index = np.where(
-        (anchors[:, 0] < 0) |
-        (anchors[:, 1] < 0) |
-        (anchors[:, 2] > 448) |
-        (anchors[:, 3] > 448)
-    )[0]
-
-    #set all invalid anchors to 0
-    anchors[invalid_index] = [0,0,0,0]
-
-    #scale anchors coordinates to in range (0,1)
-    scaled_anchors = anchors / 448
-
-    tensor_anchors = torch.tensor(scaled_anchors, dtype=torch.float)
-
-    return tensor_anchors
-
 class HBP(torch.nn.Module):
     def __init__(self):
         torch.nn.Module.__init__(self)
         # Convolution and pooling layers of VGG-16.
         self.features = torchvision.models.vgg16(pretrained=True).features
+
         self.features_conv4_3 = torch.nn.Sequential(*list(self.features.children())
                                             [:23])
         self.resize_halve = torch.nn.Upsample(size=(28, 28), mode='bilinear')
@@ -101,32 +40,17 @@ class HBP(torch.nn.Module):
                                             [-5:-3])  
         self.features_conv5_3 = torch.nn.Sequential(*list(self.features.children())
                                             [-3:-1])     
-
+        # self.bilinear_proj = torch.nn.Sequential(torch.nn.Conv2d(512,8192,kernel_size=1,bias=False),
+        #                                 torch.nn.BatchNorm2d(8192),
+        #                                 torch.nn.ReLU(inplace=True))
         self.bilinear_proj = torch.nn.Sequential(torch.nn.Conv2d(512,1024,kernel_size=1,bias=False),
                                         torch.nn.BatchNorm2d(1024),
                                         torch.nn.ReLU(inplace=True))
-        
-        #DEFINE RPN
-        self.crop_height = 7
-        self.crop_width = 7
-        self.anchors = generate_anchors()
-        self.n_anchor = 9 # Number of anchors at each location
-        self.rpn_conv = torch.nn.Conv2d(512, 512, kernel_size = 3,  stride = 1, padding = 0)
-        
-        self.rpn_cls_layer = torch.nn.Conv2d(512, 9, kernel_size = 1, stride = 1, padding = 0)
-
-        self.sigmoid = torch.nn.Sigmoid()
-
-        # init conv sliding layer
-        self.rpn_conv.weight.data.normal_(0, 0.01)
-        self.rpn_conv.bias.data.zero_()
-
-        # init classification layer
-        self.rpn_cls_layer.weight.data.normal_(0, 0.01)
-        self.rpn_cls_layer.bias.data.zero_()
-
         # Linear classifier.
         self.fc = torch.nn.Linear(1024*3, 200)
+
+        self.crop_height = 7
+        self.crop_width = 7
 
         # Freeze all previous layers.
         for param in self.features_conv4_3.parameters():
@@ -162,7 +86,6 @@ class HBP(torch.nn.Module):
         proj_2 = self.bilinear_proj(conv2)
         assert(proj_1.size() == (N,1024,7,7))
 
-        #get interactions between projections
         X = proj_1 * proj_2
 
         assert(X.size() == (N,1024,7,7))    
@@ -174,26 +97,37 @@ class HBP(torch.nn.Module):
 
     def forward(self, X):
         N = X.size()[0]
+
         assert X.size() == (N, 3, 448, 448)
 
-        anchors = self.anchors
+        # print("fc weights")
+        # print(self.fc.weight.data)
 
-        #get tensor of all anchors coordinates for N samples
-        anchors = torch.cat(([anchors] * N),0)
+        # print("fc bias")
+        # print(self.fc.bias.data)
 
-        boxes_data = torch.tensor(anchors, dtype=torch.float64)
+        box = torch.tensor([[0, 0, 1, 1]], dtype=torch.float64).cuda()
+        #box = np.array([[0, 0, 1, 1]])
+        '''
+        print("box type")
+        print(type(box))
+        '''
+        boxes = torch.tensor(box, dtype=torch.double).cuda()
+        boxes_data = torch.cat(([boxes] * N),0)
 
-        #going through code to integrate HBP_anchors to here.
-        #use some pytorch operation like expand or repeat to 
-        #get box_index concattenated
+        # print("box_tensor type")
+        # print(type(box_tensor))
+        #boxes_data = torch.Tensor([[0, 0, 1, 1]], device='cpu')
+        #boxes_data = torch.FloatTensor(box_tensor)
+        '''
+        print("boxes_data type")
+        print(type(boxes_data))
+        '''
 
-        box_index_data = torch.tensor(range(N), dtype=torch.int32)
-        box_index_data = box_index_data.repeat(6084,1)
-        box_index_data = box_index_data.transpose(0,1)
-        box_index_data = box_index_data.reshape(N*6084)
+        box_index_data = torch.zeros(N, dtype=torch.int32)
 
-        boxes = Variable(boxes_data, requires_grad=False)
-        box_index = Variable(box_index_data, requires_grad=False)
+        boxes = Variable(boxes_data, requires_grad=False).cuda()
+        box_index = Variable(box_index_data, requires_grad=False).cuda()
 
         X_conv4_3 = self.features_conv4_3(X)
 
@@ -207,61 +141,28 @@ class HBP(torch.nn.Module):
         X_conv4_add_5_2 = X_conv5_2.add(X_conv4_3_down)
         X_conv4_add_5_3 = X_conv5_3.add(X_conv4_3_down)
 
-        #Set above feature maps to requires_grad = False for cropping
 
-        X_fmap_1 = Variable(X_conv4_add_5_1, requires_grad=False)
-        X_fmap_2 = Variable(X_conv4_add_5_2, requires_grad=False)
-        X_fmap_3 = Variable(X_conv4_add_5_3, requires_grad=False)
+        X_conv451_crop = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_conv4_add_5_1, boxes, box_index)
 
-        #Cropping feature maps to 7x7 boxes
-        X_fmap_1_cropped = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_fmap_1, boxes, box_index)
-        X_fmap_2_cropped = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_fmap_2, boxes, box_index)
-        X_fmap_3_cropped = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_fmap_3, boxes, box_index)
+        X_conv452_crop = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_conv4_add_5_2, boxes, box_index)
+
+        X_conv453_crop = CropAndResizeFunction(self.crop_height, self.crop_width, 0)(X_conv4_add_5_3, boxes, box_index)
         
-        #reshape to match rpn output
-        X_fmap_1_reshape = np.reshape(X_fmap_1_cropped, (N, 9, 26, 26, 512,7,7))
-        X_fmap_2_reshape = np.reshape(X_fmap_2_cropped, (N, 9, 26, 26, 512,7,7))
-        X_fmap_3_reshape = np.reshape(X_fmap_3_cropped, (N, 9, 26, 26, 512,7,7))
+        # print("X_conv451_crop")
+        # print(X_conv451_crop)
 
-        #Apply RPN
-        rpn_conv1 = self.rpn_conv(X_conv4_add_5_1)
-        rpn_conv2 = self.rpn_conv(X_conv4_add_5_2)
-        rpn_conv3 = self.rpn_conv(X_conv4_add_5_3)
+        X_branch_1 = self.hbp(X_conv451_crop,X_conv452_crop)
+        X_branch_2 = self.hbp(X_conv452_crop,X_conv453_crop)
+        X_branch_3 = self.hbp(X_conv451_crop,X_conv453_crop)
 
-        cls_scores_1 = self.rpn_cls_layer(rpn_conv1)
-        cls_scores_2 = self.rpn_cls_layer(rpn_conv1)
-        cls_scores_3 = self.rpn_cls_layer(rpn_conv1)
-
-        rpn_scores_1 = self.sigmoid(cls_scores_1)
-        rpn_scores_2 = self.sigmoid(cls_scores_2)
-        rpn_scores_3 = self.sigmoid(cls_scores_3)
-
-        #is there a better way using view()?
-        rpn_scores_reshape_1 = rpn_scores_1.view(N, 9, 26, 26, 1, 1, 1)
-        rpn_scores_reshape_2 = rpn_scores_2.view(N, 9, 26, 26, 1, 1, 1)
-        rpn_scores_reshape_3 = rpn_scores_3.view(N, 9, 26, 26, 1, 1, 1)
-
-        rpn_sum_1 = torch.sum(rpn_scores_1)
-        rpn_sum_2 = torch.sum(rpn_scores_2)
-        rpn_sum_3 = torch.sum(rpn_scores_3)
-
-        weighted_sc_num_1 = rpn_scores_reshape_1 * X_fmap_1_reshape
-        weighted_sc_num_2 = rpn_scores_reshape_2 * X_fmap_2_reshape
-        weighted_sc_num_3 = rpn_scores_reshape_3 * X_fmap_3_reshape
-
-        sum_num_1 = torch.sum(weighted_sc_num_1, dim = (1,2,3))
-        sum_num_2 = torch.sum(weighted_sc_num_2, dim = (1,2,3))
-        sum_num_3 = torch.sum(weighted_sc_num_3, dim = (1,2,3))
-
-        weighted_score_1 = sum_num_1/rpn_sum_1
-        weighted_score_2 = sum_num_2/rpn_sum_2
-        weighted_score_3 = sum_num_3/rpn_sum_3
-
-        X_branch_1 = self.hbp(weighted_score_1, weighted_score_2)
-        X_branch_2 = self.hbp(weighted_score_2, weighted_score_3)
-        X_branch_3 = self.hbp(weighted_score_1, weighted_score_3)
+        # print("X_branch_1")
+        # print(X_branch_1)
 
         X_branch = torch.cat([X_branch_1,X_branch_2,X_branch_3],dim = 1)
+        
+        #print("X_branch size")
+        #print(X_branch.size())
+        
         assert X_branch.size() == (N,1024*3)
         X = self.fc(X_branch)
         assert X.size() == (N, 200)
@@ -275,6 +176,7 @@ class HBPManager(object):
         self._net = torch.nn.DataParallel(HBP()).cuda()
         print(self._net)
         # Criterion.
+        #self._criterion = torch.nn.CrossEntropyLoss().cuda()
         self._criterion = torch.nn.CrossEntropyLoss().cuda()
         # Solver.
         param_to_optim = []
@@ -283,9 +185,15 @@ class HBPManager(object):
                 continue
             param_to_optim.append(param)
 
-        self._solver = torch.optim.SGD(
+        # Using ADAM
+        self._solver = torch.optim.Adam(
             param_to_optim, lr=self._options['base_lr'],
-            momentum=0.9, weight_decay=self._options['weight_decay'])
+            weight_decay=self._options['weight_decay'])
+
+        # Commented 
+        # self._solver = torch.optim.SGD(
+        #     param_to_optim, lr=self._options['base_lr'],
+        #     momentum=0.9, weight_decay=self._options['weight_decay'])
 
         milestones = [40,60,80,100]
         self._scheduler = torch.optim.lr_scheduler.MultiStepLR(self._solver,milestones = milestones,gamma=0.25)
@@ -312,93 +220,89 @@ class HBPManager(object):
             root=self._path['cub200'], train=False, download=True,
             transform=test_transforms)
 
-        #added to train on one batch
         batch_indices = [536,54,4400,1769,1518,1287,5554,4919,2547,2249,5757,589] #12 indices
-
+        '''
+        5508,3672,4026,2859,1701,3799,5087,2493,3256,5808,4979,3464,4302,4653,3412,
+        5356,4758,2591,3814,2814,2647,3535,4422,4417,1810,1946,2256,2536,3457,5382,
+        4850,3930,306,2658,3066,298,109,4691,2458,4867,5841,1283,640,3646,5635,4700,
+        2306,5317,5666,595,4930,4011,906,3592,1372,3972,3415,594,1364,4541,4727,5026,
+        1939,2917,347,5931,970,622,5380,2673,1145,1339,3743,1192,1606,1075,5740,2909,
+        4918,3315,3741,1486,149,3765,3123,1756,5098]
+        '''
         subset_sampler = torch.utils.data.sampler.SubsetRandomSampler(batch_indices)
 
         self._train_loader = torch.utils.data.DataLoader(
             train_data, batch_size=self._options['batch_size'],
             shuffle=False, sampler=subset_sampler, num_workers=4, pin_memory=True)
-        # self._train_loader = torch.utils.data.DataLoader(
-        #     train_data, batch_size=self._options['batch_size'],
-        #     shuffle=True, num_workers=4, pin_memory=True)
-
+            #shuffle=True, num_workers=4, pin_memory=True) #changed to shuffle=false for one batch
         self._test_loader = torch.utils.data.DataLoader(
-            test_data, batch_size=1,
+            test_data, batch_size=self._options['test_batch_size'],
             shuffle=False, num_workers=4, pin_memory=True)
 
     def train(self):
-        print('Training.')
+        #print('Training.')
         best_acc = 0.0
         best_epoch = None
-        print('Epoch\tTrain loss\tTrain acc\tTest acc')
+        #print('Epoch\tTrain loss\tTrain acc\tTest acc')
         ii = 0
 
+        '''
         tr_writer = SummaryWriter(
         log_dir=os.path.join(self._options['log_dir'], "train"))
         va_writer = SummaryWriter(
         log_dir=os.path.join(self._options['log_dir'], "valid"))
-
+        '''
+        iteration = 0
         for t in range(self._options['epochs']):
             epoch_loss = []
             num_correct = 0
             num_total = 0
+            self._net.train()
+            self._scheduler.step()
+            counter = 0
             for X, y in self._train_loader:
+                counter += 1
                 # Data.
                 X = torch.autograd.Variable(X.cuda())
                 y = torch.autograd.Variable(y.cuda(non_blocking = True))
+                #X, y = X.cuda(), y.cuda()
+
+                # print("X.size")
+                # print(X.shape)
                 # Clear the existing gradients.
                 self._solver.zero_grad()
                 # Forward pass.
                 score = self._net(X)
                 loss = self._criterion(score, y)
-                epoch_loss.append(loss.item())
-                # Prediction.
-                _, prediction = torch.max(score.data, 1)
-                num_total += y.size(0)
-                num_correct += torch.sum(prediction == y.data)
                 # Backward pass.
                 loss.backward()
                 self._solver.step()
 
-                ii += 1
-                x = torch.Tensor([ii])
-                y = torch.Tensor([loss.item()])
+                iteration += 1
+                #Start logging
+                if iteration % 12 == 0:
+                    # Add the values to Summary Writer
+                    # self.writer.add_scalar('train/loss', loss.item(), self.args.iter_count)
+                    # train_acc = 100 * num_correct / num_total
+                    
+                # epoch_loss.append(loss.item())
 
-            #num_correct = torch.tensor(num_correct).float().cuda()
-            num_correct = num_correct.clone().detach().float().cuda()
-            #num_correct = num_correct.clone().detach().requires_grad_(True).float()
+                    # Prediction for current batch
+                    _, prediction = torch.max(score.data, 1)
+                    num_total = y.size(0)
+                    num_correct = torch.sum(prediction == y.data)
 
-            num_total = torch.tensor(num_total).float().cuda()
-            #num_total = num_total.clone().detach().float().cuda()
+                    train_acc = 100 * num_correct / num_total
+                    # print("train_acc:", train_acc.item())
 
-            train_acc = 100 * num_correct / num_total
-            test_acc = self._accuracy(self._test_loader)
-            self._scheduler.step(test_acc)
-            if test_acc > best_acc:
-                best_acc = test_acc
-                best_epoch = t + 1
-                print('*', end='')
-                # Save model onto disk.
-                torch.save(self._net.state_dict(),
-                           os.path.join(self._path['model'],
-                                        'HBP_fc_1024_epoch_%d.pth' % (t + 1)))
-            
-
-            tr_writer.add_scalar('Training Loss', sum(epoch_loss) / len(epoch_loss), t + 1)
-            tr_writer.add_scalar('Training Accuracy', train_acc, t + 1)
-            va_writer.add_scalar('Validation Accuracy', test_acc, t + 1)
-            
-            print('%d\t%4.3f\t\t%4.2f%%\t\t%4.2f%%' %
-                  (t+1, sum(epoch_loss) / len(epoch_loss), train_acc, test_acc))
-
-        print('Best at epoch %d, test accuaray %f' % (best_epoch, best_acc))
+                    print('Train Epoch: {} Iteration: {} \tLoss_tr: {:.2f} \tTrain_Acc: {:.2f} '.format(
+                        t, iteration, loss.item(), train_acc.item()))
 
     def _accuracy(self, data_loader):
-        self._net.train(False)
+        self._net.train(False) # Abhi
         num_correct = 0
         num_total = 0
+        loss_test = 0
         for X, y in data_loader:
             # Data.
             X = torch.autograd.Variable(X.cuda())
@@ -408,11 +312,13 @@ class HBPManager(object):
             _, prediction = torch.max(score.data, 1)
             num_total += y.size(0)
             num_correct += torch.sum(prediction == y.data)
-        self._net.train(True)  # Set the model to training phase
+            # Calculate loss
+            loss_test += self._criterion(score, y)
+        self._net.train(True)  # Set the model to training phase ---> Abhi
         #num_correct = torch.tensor(num_correct).float().cuda()
         num_correct = num_correct.clone().detach().float().cuda()
         num_total = torch.tensor(num_total).float().cuda()
-        return 100 * num_correct / num_total
+        return 100 * num_correct / num_total, loss_test//len(data_loader)
 
     def getStat(self):
         print('Compute mean and variance for training data.')
@@ -430,13 +336,13 @@ class HBPManager(object):
                 std[d] += X[:, d, :, :].std()
         mean.div_(len(train_data))
         std.div_(len(train_data))
+        print("mean")
         print(mean)
+        print("standard deviation")
         print(std)
 
 
 def main():
-
-    '''
 
     parser = argparse.ArgumentParser(
         description='Train HBP on CUB200.')
@@ -449,7 +355,7 @@ def main():
     parser.add_argument('--weight_decay', dest='weight_decay', type=float,
                         required=True, help='Weight decay.')
     parser.add_argument('--log_dir', dest='log_dir', type=str,
-                        required=True, help='Name of log directory.')
+                        required=False, help='Name of log directory.')
     args = parser.parse_args()
     if args.base_lr <= 0:
         raise AttributeError('--base_lr parameter must >0.')
@@ -459,20 +365,22 @@ def main():
         raise AttributeError('--epochs parameter must >=0.')
     if args.weight_decay <= 0:
         raise AttributeError('--weight_decay parameter must >0.')
-    '''
 
-    base_lr = 1.0
-    batch_size = 12
-    epochs = 120
-    weight_decay = 0.000005
-    log_dir = 'logs_fc_rpn'
+    # base_lr = 3e-3
+    # batch_size = 8
+    # epochs = 120
+    # weight_decay = 0.000005  # Default val: 0.000005
+    # log_dir = 'logs_fc_roialign'
+
+    test_batch_size = 1
 
     options = {
-        'base_lr': base_lr,
-        'batch_size': batch_size,
-        'epochs': epochs,
-        'weight_decay': weight_decay,
-        'log_dir': log_dir,
+        'base_lr': args.base_lr,
+        'batch_size': args.batch_size,
+        'epochs': args.epochs,
+        'weight_decay': args.weight_decay,
+        #'log_dir': args.log_dir,
+        'test_batch_size' : test_batch_size
     }
 
     project_root = os.popen('pwd').read().strip()
@@ -484,7 +392,7 @@ def main():
         print(d)
         assert os.path.isdir(path[d])
 
-    manager = HBPManager(options, path)
+    manager = HBPManager(options, path) 
     manager.getStat()
     manager.train()
 
